@@ -1,0 +1,79 @@
+from __future__ import annotations
+
+from datetime import datetime
+from uuid import UUID
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+
+class ConversationInput(BaseModel):
+    title: str = Field(default="新咨询", min_length=1, max_length=100)
+
+
+class ConversationView(ConversationInput):
+    model_config = ConfigDict(from_attributes=True)
+    id: UUID
+    history_version: int
+    updated_at: datetime
+
+
+class AttachmentView(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: UUID
+    name: str
+    mime_type: str
+    size: int
+    bound: bool
+
+
+class TurnView(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: UUID
+    request_id: UUID
+    sequence: int
+    user_text: str
+    answer: str
+    attachment_ids: list[str]
+    sources: list[dict[str, object]]
+    config_snapshot: dict[str, object]
+    created_at: datetime
+
+
+class GenerateInput(BaseModel):
+    request_id: UUID
+    model_id: UUID
+    prompt_id: UUID | None = None
+    text: str = Field(default="", max_length=30000)
+    attachment_ids: list[UUID] = Field(default_factory=list, max_length=10)
+    knowledge_enabled: bool = False
+
+    @model_validator(mode="after")
+    def validate_content(self) -> GenerateInput:
+        if not self.text.strip() and not self.attachment_ids:
+            raise ValueError("请输入问题或上传附件")
+        if len(set(self.attachment_ids)) != len(self.attachment_ids):
+            raise ValueError("附件不能重复")
+        if self.knowledge_enabled and not self.text.strip():
+            raise ValueError("知识库查询需要文字问题")
+        return self
+
+
+class MemoryTurn(BaseModel):
+    sequence: int
+    user_text: str
+    answer: str
+    attachment_ids: list[UUID] = Field(default_factory=list)
+
+
+class Memory(BaseModel):
+    history_version: int = 0
+    policy_version: str
+    covered_through: int = 0
+    summary: str = ""
+    keywords: list[str] = Field(default_factory=list)
+    recent: list[MemoryTurn] = Field(default_factory=list)
+
+
+class SummaryResult(BaseModel):
+    summary: str = Field(max_length=8000)
+    keywords: list[str] = Field(max_length=30)

@@ -1,0 +1,53 @@
+name: legal-ai-dev
+
+# 仅本地开发，复用已有镜像，不自动拉取。
+services:
+  postgres:
+    image: pgvector/pgvector:pg18-trixie
+    pull_policy: never
+    container_name: legal-ai-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-legal_ai}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?请设置 POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-legal_ai}
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      # PostgreSQL 18 挂载父目录，独立卷不复用旧 PostgreSQL 17 数据。
+      - postgres18_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", 'pg_isready -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    restart: unless-stopped
+  redis:
+    image: redis:8-alpine
+    pull_policy: never
+    container_name: legal-ai-redis
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?请设置 REDIS_PASSWORD}
+    command:
+      - sh
+      - -c
+      - >-
+        exec redis-server
+        --appendonly yes
+        --appendfsync always
+        --maxmemory-policy noeviction
+        --requirepass "$$REDIS_PASSWORD"
+    ports:
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", 'REDISCLI_AUTH="$$REDIS_PASSWORD" redis-cli ping | grep -q PONG']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    restart: unless-stopped
+volumes:
+  postgres18_data:
+  redis_data:
