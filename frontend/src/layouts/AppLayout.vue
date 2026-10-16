@@ -59,8 +59,14 @@ watch(
             v-if="feature.to"
             :to="feature.to"
             class="nav-item"
-            :class="{ 'is-active': route.name === 'consultation' }"
-            :aria-current="route.name === 'consultation' ? 'page' : undefined"
+            :class="{
+              'is-active': route.path === feature.to || route.path.startsWith(feature.to + '/'),
+            }"
+            :aria-current="
+              route.path === feature.to || route.path.startsWith(feature.to + '/')
+                ? 'page'
+                : undefined
+            "
             ><AppIcon :name="feature.icon" :size="20" /><span>{{ feature.title }}</span></RouterLink
           >
           <button v-else class="nav-item" disabled :aria-label="`${feature.title}，即将开放`">
@@ -127,7 +133,7 @@ watch(
         :class="{ 'page-content--conversation': route.name === 'consultation' }"
         tabindex="-1"
       >
-        <RouterView />
+        <RouterView :key="route.path" />
       </main>
     </div>
   </div>

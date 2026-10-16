@@ -13,6 +13,7 @@ from app.core.logging import RequestLoggingMiddleware, configure_logging
 from app.core.redis import RedisClient
 from app.modules.consultation.memory import MemoryStore
 from app.modules.consultation.service import ConsultationService
+from app.modules.knowledge.worker import KnowledgeWorker
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -31,6 +32,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await redis.initialize()
             consultation = ConsultationService(database.sessions, config, MemoryStore(redis.client))
             maintenance = asyncio.create_task(consultation.maintain_attachments())
+
+            knowledge_worker = KnowledgeWorker(database.sessions, config)
+            knowledge_tasks = [
+                asyncio.create_task(knowledge_worker.run(kind)) for kind in ("PARSE", "EMBED")
+            ]
+            knowledge_tasks.append(asyncio.create_task(knowledge_worker.maintain_lexical_index()))
+
+            async def stop_knowledge() -> None:
+                for task in knowledge_tasks:
+                    task.cancel()
+                await asyncio.gather(*knowledge_tasks, return_exceptions=True)
+
+            stack.push_async_callback(stop_knowledge)
 
             async def stop_maintenance() -> None:
                 maintenance.cancel()

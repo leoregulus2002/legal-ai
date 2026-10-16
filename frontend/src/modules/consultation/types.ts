@@ -19,6 +19,14 @@ export interface Source {
   content: string
   source: string
   score: number
+  score_type?: 'cosine' | 'keyword_coverage' | null
+  fusion_score?: number | null
+  bm25_score?: number | null
+  cosine_score?: number | null
+  keyword_coverage?: number | null
+  lexical_rank?: number | null
+  vector_rank?: number | null
+  retrieval_method?: 'hybrid' | 'keyword' | 'external' | null
 }
 export interface Turn {
   id: string
@@ -26,10 +34,22 @@ export interface Turn {
   sequence: number
   user_text: string
   answer: string
+  reasoning?: string
   attachment_ids: string[]
   sources: Source[]
   config_snapshot: Record<string, unknown>
   created_at: string
+}
+export interface StoppedTurn {
+  request_id: string
+  conversation_id: string
+  after_sequence: number
+  user_text: string
+  answer: string
+  reasoning: string
+  attachments: Attachment[]
+  sources: Source[]
+  model_name: string
 }
 export interface ConsultationOptions {
   models: ModelConfig[]
@@ -43,6 +63,20 @@ export interface GenerateInput {
   text: string
   attachment_ids: string[]
   knowledge_enabled: boolean
+}
+
+export interface ContextUsageInput {
+  conversation_id: string | null
+  model_id: string
+  text: string
+  attachment_ids: string[]
+  knowledge_enabled: boolean
+}
+
+export interface ContextUsage {
+  used_tokens: number | null
+  context_tokens: number
+  max_output_tokens: number
 }
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
@@ -66,6 +100,7 @@ export function isTurn(value: unknown): value is Turn {
     typeof value.sequence === 'number' &&
     typeof value.user_text === 'string' &&
     typeof value.answer === 'string' &&
+    (value.reasoning === undefined || typeof value.reasoning === 'string') &&
     Array.isArray(value.attachment_ids) &&
     value.attachment_ids.every((id: unknown) => typeof id === 'string') &&
     Array.isArray(value.sources) &&

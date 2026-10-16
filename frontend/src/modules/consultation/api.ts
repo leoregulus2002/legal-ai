@@ -1,7 +1,18 @@
 import { apiClient } from '../../api/client'
-import type { Attachment, ConsultationOptions, Conversation, Turn } from './types'
+import type {
+  Attachment,
+  ConsultationOptions,
+  ContextUsage,
+  ContextUsageInput,
+  Conversation,
+  Turn,
+} from './types'
 
 export const consultationApi = {
+  async contextUsage(data: ContextUsageInput, signal: AbortSignal): Promise<ContextUsage> {
+    return (await apiClient.post<ContextUsage>('/consultation/context-usage', data, { signal }))
+      .data
+  },
   async options(): Promise<ConsultationOptions> {
     return (await apiClient.get<ConsultationOptions>('/consultation/options')).data
   },

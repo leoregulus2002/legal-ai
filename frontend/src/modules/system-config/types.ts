@@ -1,7 +1,7 @@
 export interface ModelInput {
   name: string
   model_type: 'chat' | 'embedding' | 'other'
-  protocol: 'chat_completions' | 'responses'
+  protocol: 'chat_completions' | 'responses' | 'openai_embeddings' | 'dashscope_embeddings'
   base_url: string
   model_name: string
   api_key?: string
@@ -14,6 +14,10 @@ export interface ModelInput {
   max_output_tokens: number
   token_parameter: 'max_tokens' | 'max_completion_tokens'
   temperature: number | null
+  embedding_dimensions: number | null
+  embedding_batch_size: number
+  embedding_timeout: number
+  embedding_query_instruction: string
 }
 
 export interface ModelConfig extends Omit<ModelInput, 'api_key' | 'clear_api_key'> {
@@ -44,22 +48,17 @@ export interface Policy {
   summary_chars: number
   keyword_count: number
   memory_ttl_days: number
-  knowledge_url: string
-  knowledge_threshold: number
+  knowledge_base_ids: string[]
+  knowledge_vector_threshold: number
+  knowledge_keyword_threshold: number
   knowledge_limit: number
-  knowledge_timeout: number
   request_timeout: number
   max_attachments: number
   max_file_mb: number
   max_total_mb: number
 }
-export interface PolicyInput extends Policy {
-  knowledge_api_key?: string
-  clear_knowledge_api_key?: boolean
-}
-export interface PolicyView extends Policy {
-  has_knowledge_api_key: boolean
-}
+export type PolicyInput = Policy
+export type PolicyView = Policy
 
 export const defaultPolicy = (): Policy => ({
   allowed_model_ids: [],
@@ -69,10 +68,10 @@ export const defaultPolicy = (): Policy => ({
   summary_chars: 2000,
   keyword_count: 12,
   memory_ttl_days: 7,
-  knowledge_url: '',
-  knowledge_threshold: 0.7,
+  knowledge_base_ids: [],
+  knowledge_vector_threshold: 0.3,
+  knowledge_keyword_threshold: 0,
   knowledge_limit: 5,
-  knowledge_timeout: 15,
   request_timeout: 300,
   max_attachments: 5,
   max_file_mb: 10,

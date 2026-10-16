@@ -34,6 +34,7 @@ class Turn(Base):
     sequence: Mapped[int]
     user_text: Mapped[str] = mapped_column(Text)
     answer: Mapped[str] = mapped_column(Text)
+    reasoning: Mapped[str] = mapped_column(Text, default="", server_default="")
     attachment_ids: Mapped[list[str]] = mapped_column(JSON)
     sources: Mapped[list[dict[str, object]]] = mapped_column(JSON)
     config_snapshot: Mapped[dict[str, object]] = mapped_column(JSON)

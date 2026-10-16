@@ -17,6 +17,7 @@ export type IconName =
   | 'plus'
   | 'arrow-up'
   | 'chevron-down'
+  | 'copy'
 
 defineProps<{ name: IconName; size?: number }>()
 
@@ -46,6 +47,7 @@ const paths: Record<IconName, string[]> = {
   plus: ['M12 5v14', 'M5 12h14'],
   'arrow-up': ['M12 20V4', 'm5 11 7-7 7 7'],
   'chevron-down': ['m6 9 6 6 6-6'],
+  copy: ['M9 9h11v12H9Z', 'M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1'],
 }
 </script>
 

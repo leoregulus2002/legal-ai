@@ -16,6 +16,9 @@ dependencies = [
   "cryptography>=44,<48",
   "python-multipart>=0.0.20,<1",
   "anyio>=4.8,<5",
+  "pypdf>=6.1,<7",
+  "pgvector>=0.4,<1",
+  "jieba>=0.42.1,<1",
 ]
 
 [dependency-groups]

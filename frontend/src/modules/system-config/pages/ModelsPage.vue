@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, reactive, ref, watch } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import {
   NButton,
   NCheckbox,
@@ -50,12 +50,46 @@ const defaults = (): ModelForm => ({
   token_parameter: 'max_tokens',
   temperature: null,
   api_key: '',
+  embedding_dimensions: null,
+  embedding_batch_size: 8,
+  embedding_timeout: 90,
+  embedding_query_instruction: '',
 })
 const form = reactive<ModelForm>(defaults())
-const protocols = [
-  { label: 'OpenAI 兼容 Chat Completions', value: 'chat_completions' },
-  { label: 'OpenAI Responses', value: 'responses' },
-]
+const isEmbedding = computed(() => form.model_type === 'embedding')
+const endpointPlaceholder = computed(() =>
+  !isEmbedding.value
+    ? '填写供应商 Base URL，例如 https://供应商地址/v1'
+    : form.protocol === 'dashscope_embeddings'
+      ? '填写 DashScope Base URL 或完整文本向量接口地址'
+      : '填写供应商 Base URL 或完整 /embeddings 地址',
+)
+const protocolLabels: Record<ModelInput['protocol'], string> = {
+  chat_completions: 'Chat Completions',
+  responses: 'Responses',
+  openai_embeddings: 'OpenAI 兼容 Embeddings',
+  dashscope_embeddings: 'DashScope 原生文本向量',
+}
+const protocols = computed(() =>
+  isEmbedding.value
+    ? [
+        { label: 'OpenAI 兼容 Embeddings', value: 'openai_embeddings' },
+        { label: 'DashScope 原生文本向量', value: 'dashscope_embeddings' },
+      ]
+    : [
+        { label: 'OpenAI 兼容 Chat Completions', value: 'chat_completions' },
+        { label: 'OpenAI Responses', value: 'responses' },
+      ],
+)
+function protocolLabel(model: ModelConfig): string {
+  if (
+    model.model_type === 'embedding' &&
+    ['chat_completions', 'responses'].includes(model.protocol)
+  )
+    return protocolLabels.openai_embeddings
+  return protocolLabels[model.protocol]
+}
+
 const types = [
   { label: '对话模型', value: 'chat' },
   { label: 'Embedding 模型', value: 'embedding' },
@@ -82,6 +116,11 @@ function edit(model?: ModelConfig): void {
     editing.value = id
     keyConfigured.value = has_api_key
     Object.assign(form, values, {
+      protocol:
+        model.model_type === 'embedding' &&
+        ['chat_completions', 'responses'].includes(model.protocol)
+          ? 'openai_embeddings'
+          : model.protocol,
       context_tokens: String(model.context_tokens),
       max_output_tokens: String(model.max_output_tokens),
     })
@@ -94,29 +133,79 @@ async function save(): Promise<void> {
     message.warning('请填写名称、接口地址和模型标识')
     return
   }
+  try {
+    const address = form.base_url.trim()
+    const endpoint = new URL(address)
+    if (
+      !/^https?:\/\//i.test(address) ||
+      !['http:', 'https:'].includes(endpoint.protocol) ||
+      !endpoint.hostname ||
+      endpoint.username ||
+      endpoint.password ||
+      address.includes('?') ||
+      address.includes('#')
+    ) {
+      message.warning('请输入不含凭据或查询参数的 HTTP(S) 地址')
+      return
+    }
+  } catch {
+    message.warning('请输入有效的 HTTP(S) 接口地址')
+    return
+  }
   const contextTokens = Number(form.context_tokens.trim())
   const outputTokens = Number(form.max_output_tokens.trim())
+  const minimumInputTokens = isEmbedding.value ? 1 : 1024
   if (
     !/^\d+$/.test(form.context_tokens.trim()) ||
     !Number.isSafeInteger(contextTokens) ||
-    contextTokens < 1024 ||
+    contextTokens < minimumInputTokens ||
     contextTokens > 4_000_000
   ) {
-    message.warning('上下文窗口请输入 1,024～4,000,000 之间的整数')
+    message.warning(
+      `${isEmbedding.value ? '单条输入上限' : '上下文窗口'}请输入 ${minimumInputTokens.toLocaleString()}～4,000,000 之间的整数`,
+    )
     return
   }
   if (
-    !/^\d+$/.test(form.max_output_tokens.trim()) ||
-    !Number.isSafeInteger(outputTokens) ||
-    outputTokens < 128 ||
-    outputTokens > 200_000
+    !isEmbedding.value &&
+    (!/^\d+$/.test(form.max_output_tokens.trim()) ||
+      !Number.isSafeInteger(outputTokens) ||
+      outputTokens < 128 ||
+      outputTokens > 200_000)
   ) {
     message.warning('最大输出 Token 请输入 128～200,000 之间的整数')
     return
   }
-  if (outputTokens >= contextTokens) {
+  if (!isEmbedding.value && outputTokens >= contextTokens) {
     message.warning('最大输出 Token 必须小于上下文窗口，请调大上下文窗口或调小输出上限')
     return
+  }
+  if (isEmbedding.value) {
+    if (
+      !Number.isSafeInteger(form.embedding_batch_size) ||
+      form.embedding_batch_size < 1 ||
+      form.embedding_batch_size > 32
+    ) {
+      message.warning('每批文本数量请输入 1～32 的整数')
+      return
+    }
+    if (
+      !Number.isSafeInteger(form.embedding_timeout) ||
+      form.embedding_timeout < 1 ||
+      form.embedding_timeout > 300
+    ) {
+      message.warning('请求超时请输入 1～300 秒之间的整数')
+      return
+    }
+    if (
+      form.embedding_dimensions !== null &&
+      (!Number.isSafeInteger(form.embedding_dimensions) ||
+        form.embedding_dimensions < 1 ||
+        form.embedding_dimensions > 4096)
+    ) {
+      message.warning('向量维度请输入 1～4096 的整数，或留空使用模型默认值')
+      return
+    }
   }
   if (keyAction.value === 'replace' && keyConfigured.value && !form.api_key.trim()) {
     message.warning('请输入要替换的 API Key，或选择保留现有密钥')
@@ -131,7 +220,18 @@ async function save(): Promise<void> {
       base_url: form.base_url.trim(),
       model_name: form.model_name.trim(),
       context_tokens: contextTokens,
-      max_output_tokens: outputTokens,
+      max_output_tokens: isEmbedding.value ? 0 : outputTokens,
+      supports_images: isEmbedding.value ? false : values.supports_images,
+      supports_pdf: isEmbedding.value ? false : values.supports_pdf,
+      supports_json_mode: isEmbedding.value ? false : values.supports_json_mode,
+      temperature: isEmbedding.value ? null : values.temperature,
+      embedding_dimensions: isEmbedding.value ? values.embedding_dimensions : null,
+      embedding_batch_size: isEmbedding.value ? values.embedding_batch_size : 8,
+      embedding_timeout: isEmbedding.value ? values.embedding_timeout : 90,
+      embedding_query_instruction:
+        isEmbedding.value && values.protocol === 'dashscope_embeddings'
+          ? values.embedding_query_instruction
+          : '',
       clear_api_key: keyConfigured.value && keyAction.value === 'clear',
     }
     if (keyAction.value === 'replace' && api_key.trim()) data.api_key = api_key.trim()
@@ -146,6 +246,21 @@ async function save(): Promise<void> {
     saving.value = false
   }
 }
+watch(
+  () => form.model_type,
+  (kind) => {
+    if (kind === 'embedding' && ['chat_completions', 'responses'].includes(form.protocol)) {
+      form.protocol = 'openai_embeddings'
+      form.max_output_tokens = '0'
+    } else if (
+      kind !== 'embedding' &&
+      ['openai_embeddings', 'dashscope_embeddings'].includes(form.protocol)
+    ) {
+      form.protocol = 'chat_completions'
+      if (Number(form.max_output_tokens) < 128) form.max_output_tokens = '4096'
+    }
+  },
+)
 watch(keyAction, () => {
   form.api_key = ''
 })
@@ -177,12 +292,22 @@ onMounted(() => {
             </div>
             <p>
               {{ model.model_name }} ·
-              {{ model.protocol === 'responses' ? 'Responses' : 'Chat Completions' }}
+              {{ protocolLabel(model) }}
             </p>
             <div class="row-tags">
-              <NTag size="small">{{ model.model_type === 'chat' ? '对话' : model.model_type }}</NTag
+              <NTag size="small">{{
+                model.model_type === 'chat'
+                  ? '对话'
+                  : model.model_type === 'embedding'
+                    ? '文本向量'
+                    : '其他'
+              }}</NTag
               ><NTag v-if="model.supports_images" size="small">图片</NTag
               ><NTag v-if="model.supports_pdf" size="small">PDF</NTag
+              ><NTag
+                v-if="model.model_type === 'embedding' && model.embedding_dimensions"
+                size="small"
+                >{{ model.embedding_dimensions }} 维</NTag
               ><span>{{ model.has_api_key ? '已设置密钥' : '未设置密钥' }}</span>
             </div>
           </div>
@@ -211,7 +336,7 @@ onMounted(() => {
           </div>
           <div class="form-grid">
             <NFormItem label="显示名称" required>
-              <NInput v-model:value="form.name" maxlength="100" placeholder="例如：法律咨询模型" />
+              <NInput v-model:value="form.name" maxlength="100" placeholder="填写模型显示名称" />
             </NFormItem>
             <NFormItem label="模型类型">
               <NSelect v-model:value="form.model_type" :options="types" />
@@ -237,9 +362,18 @@ onMounted(() => {
               <NInput
                 v-model:value="form.base_url"
                 maxlength="1000"
-                placeholder="https://供应商地址/v1"
+                :placeholder="endpointPlaceholder"
               />
-              <p class="model-field-hint">包含供应商要求的版本路径，例如 /v1。</p>
+              <p v-if="form.protocol === 'dashscope_embeddings'" class="model-field-hint">
+                支持百炼业务空间域名、/api/v1 原生地址、/compatible-mode/v1
+                兼容地址或完整文本向量接口地址。百炼兼容地址会按当前协议解析为原生调用路径，请使用同地域的
+                API Key。
+              </p>
+              <p v-else-if="isEmbedding" class="model-field-hint">
+                支持供应商 Base URL 或完整 /embeddings 地址。百炼官方域名支持直接填写 /api/v1 或
+                /compatible-mode/v1，系统会使用 OpenAI 兼容调用路径。
+              </p>
+              <p v-else class="model-field-hint">包含供应商要求的版本路径，例如 /v1。</p>
             </div>
           </NFormItem>
           <div class="model-key-panel">
@@ -283,7 +417,79 @@ onMounted(() => {
             </p>
           </div>
         </section>
-        <section class="model-form-section" aria-labelledby="model-generation-title">
+        <section
+          v-if="isEmbedding"
+          class="model-form-section"
+          aria-labelledby="model-embedding-title"
+        >
+          <div class="model-section-heading">
+            <h2 id="model-embedding-title">文本向量参数</h2>
+          </div>
+          <div class="form-grid">
+            <NFormItem label="单条输入上限（Token）" required
+              ><div class="model-field">
+                <NInput
+                  v-model:value="form.context_tokens"
+                  inputmode="numeric"
+                  placeholder="按模型要求填写输入上限"
+                />
+                <p class="model-field-hint">
+                  按供应商模型限制填写。输入长度会在请求前进行保守估算。
+                </p>
+              </div></NFormItem
+            >
+            <NFormItem label="输出向量维度"
+              ><div class="model-field">
+                <NInputNumber
+                  v-model:value="form.embedding_dimensions"
+                  :min="1"
+                  :max="4096"
+                  :precision="0"
+                  clearable
+                  placeholder="留空使用模型默认维度"
+                />
+                <p class="model-field-hint">按模型支持的维度填写；不支持维度参数的模型请留空。</p>
+              </div></NFormItem
+            >
+            <NFormItem label="每批文本数量" required
+              ><div class="model-field">
+                <NInputNumber
+                  v-model:value="form.embedding_batch_size"
+                  :min="1"
+                  :max="32"
+                  :precision="0"
+                />
+                <p class="model-field-hint">按供应商的批量限制填写，最多 32 条。</p>
+              </div></NFormItem
+            >
+            <NFormItem label="请求超时（秒）" required>
+              <div class="model-field">
+                <NInputNumber
+                  v-model:value="form.embedding_timeout"
+                  :min="1"
+                  :max="300"
+                  :precision="0"
+                />
+                <p class="model-field-hint">可填写 1～300 秒。</p>
+              </div>
+            </NFormItem>
+          </div>
+          <NFormItem v-if="form.protocol === 'dashscope_embeddings'" label="检索指令（可选）"
+            ><div class="model-field">
+              <NInput
+                v-model:value="form.embedding_query_instruction"
+                type="textarea"
+                :maxlength="2000"
+                placeholder="留空使用模型默认检索行为"
+              />
+              <p class="model-field-hint">仅在 query 检索时发送；入库固定使用 document 类型。</p>
+            </div></NFormItem
+          >
+          <p class="model-field-hint">
+            更改协议、模型、维度或检索指令后，请重新向量化相关文档，避免混用已有向量。
+          </p>
+        </section>
+        <section v-else class="model-form-section" aria-labelledby="model-generation-title">
           <div class="model-section-heading"><h2 id="model-generation-title">生成参数</h2></div>
           <div class="form-grid">
             <NFormItem label="上下文窗口（Token）" required>
@@ -403,6 +609,15 @@ onMounted(() => {
 .model-form-section :deep(.n-form-item) {
   margin-bottom: 16px;
 }
+.model-form-section .form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
+  column-gap: 20px;
+}
+.model-form-section :deep(.n-form-item-blank) {
+  align-items: flex-start;
+}
 .model-field,
 .model-field :deep(.n-input-number) {
   width: 100%;
@@ -443,5 +658,10 @@ onMounted(() => {
   display: flex;
   justify-content: flex-end;
   gap: 10px;
+}
+@media (max-width: 620px) {
+  .model-form-section .form-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 </style>

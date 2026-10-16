@@ -3,6 +3,7 @@ from uuid import UUID
 from app.common.exceptions import AppError
 from app.core.config import Settings
 from app.core.secrets import encrypt
+from app.modules.knowledge.repository import KnowledgeRepository
 from app.modules.system_config.models import ModelConfig, PromptVersion, SystemPrompt
 from app.modules.system_config.repository import ConfigRepository
 from app.modules.system_config.schemas import (
@@ -85,7 +86,7 @@ class ConfigService:
 
     async def policy(self) -> PolicyView:
         row = await self.repo.policy()
-        return PolicyView(**row.settings, has_knowledge_api_key=bool(row.kb_key_encrypted))
+        return PolicyView.model_validate(row.settings)
 
     async def save_policy(self, data: PolicyInput) -> PolicyView:
         row = await self.repo.policy(lock=True)
@@ -97,11 +98,10 @@ class ConfigService:
             prompt = await self.repo.prompt(data.default_prompt_id)
             if not prompt or not prompt.enabled:
                 raise AppError("invalid_prompt", "请选择已启用的系统提示词")
-        if data.knowledge_api_key and data.clear_knowledge_api_key:
-            raise AppError("invalid_credential", "不能同时设置和清除知识库密钥")
+        existing = await KnowledgeRepository(self.repo.session).existing_base_ids(
+            data.knowledge_base_ids
+        )
+        if existing != set(data.knowledge_base_ids):
+            raise AppError("invalid_knowledge_base", "所选知识库已不存在，请重新选择")
         row.settings = Policy.model_validate(data.model_dump()).model_dump(mode="json")
-        if data.knowledge_api_key:
-            row.kb_key_encrypted = encrypt(data.knowledge_api_key.get_secret_value(), self.settings)
-        elif data.clear_knowledge_api_key:
-            row.kb_key_encrypted = None
-        return PolicyView(**row.settings, has_knowledge_api_key=bool(row.kb_key_encrypted))
+        return PolicyView.model_validate(row.settings)

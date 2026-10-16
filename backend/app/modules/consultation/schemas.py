@@ -33,6 +33,7 @@ class TurnView(BaseModel):
     sequence: int
     user_text: str
     answer: str
+    reasoning: str = ""
     attachment_ids: list[str]
     sources: list[dict[str, object]]
     config_snapshot: dict[str, object]
@@ -54,8 +55,23 @@ class GenerateInput(BaseModel):
         if len(set(self.attachment_ids)) != len(self.attachment_ids):
             raise ValueError("附件不能重复")
         if self.knowledge_enabled and not self.text.strip():
-            raise ValueError("知识库查询需要文字问题")
+            # 纯附件消息交由多模态模型处理，不使用空文字查询知识库。
+            self.knowledge_enabled = False
         return self
+
+
+class ContextUsageInput(BaseModel):
+    conversation_id: UUID | None = None
+    model_id: UUID
+    text: str = Field(default="", max_length=30000)
+    attachment_ids: list[UUID] = Field(default_factory=list, max_length=10)
+    knowledge_enabled: bool = False
+
+
+class ContextUsageView(BaseModel):
+    used_tokens: int | None
+    context_tokens: int
+    max_output_tokens: int
 
 
 class MemoryTurn(BaseModel):

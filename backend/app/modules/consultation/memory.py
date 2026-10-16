@@ -22,7 +22,8 @@ return 1
 
 
 def policy_version(policy: Policy) -> str:
-    values = [policy.recent_turns, policy.summary_chars, policy.keyword_count]
+    # 压缩策略变化后从完整历史重建，避免旧滑动窗口快照错开批次边界。
+    values = ["batch-v1", policy.recent_turns, policy.summary_chars, policy.keyword_count]
     return hashlib.sha256(json.dumps(values).encode()).hexdigest()[:16]
 
 

@@ -7,6 +7,8 @@ from fastapi.responses import FileResponse, StreamingResponse
 from app.modules.consultation.memory import MemoryStore
 from app.modules.consultation.schemas import (
     AttachmentView,
+    ContextUsageInput,
+    ContextUsageView,
     ConversationInput,
     ConversationView,
     GenerateInput,
@@ -31,6 +33,11 @@ Service = Annotated[ConsultationService, Depends(get_service)]
 @router.get("/options")
 async def options(service: Service) -> dict[str, object]:
     return await service.options()
+
+
+@router.post("/context-usage", response_model=ContextUsageView)
+async def context_usage(data: ContextUsageInput, service: Service) -> ContextUsageView:
+    return await service.context_usage(data)
 
 
 @router.get("/conversations", response_model=list[ConversationView])

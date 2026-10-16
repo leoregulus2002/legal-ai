@@ -12,6 +12,7 @@ import {
   type Conversation,
   type GenerateInput,
   type Source,
+  type StoppedTurn,
   type Turn,
 } from './types'
 
@@ -20,11 +21,16 @@ export const useConsultationStore = defineStore('consultation', () => {
   const conversations = ref<Conversation[]>([])
   const activeId = ref<string>()
   const turns = ref<Turn[]>([])
+  const stoppedTurns = ref<StoppedTurn[]>([])
   const attachments = ref<Attachment[]>([])
   const generating = ref(false)
+  const stopRequested = ref(false)
+  const compressingContext = ref(false)
   const loading = ref(false)
   const draftAnswer = ref('')
+  const draftReasoning = ref('')
   const draftQuestion = ref('')
+  const draftAttachments = ref<Attachment[]>([])
   const draftSources = ref<Source[]>([])
   const selectedModel = ref<string | null>(null)
   const knowledgeEnabled = ref(false)
@@ -90,16 +96,21 @@ export const useConsultationStore = defineStore('consultation', () => {
   ): Promise<{ saved: boolean; rebuildRequired: boolean; cancelled: boolean }> {
     if (!selectedModel.value || generating.value || !options.value)
       throw new ApiError('请先选择对话模型', 'unknown')
+    const useKnowledge = knowledgeEnabled.value && !!text.trim()
+    if (useKnowledge && !options.value.policy.knowledge_base_ids?.length)
+      throw new ApiError('请先在法律咨询模型中添加内部知识库', 'unknown')
     const promptId =
       options.value.prompts.find((prompt) => prompt.id === options.value?.policy.default_prompt_id)
         ?.id ?? null
     const id = activeId.value ?? (await create())
+    const afterSequence = turns.value.at(-1)?.sequence ?? 0
+    const modelName = model.value?.name ?? '法律对话'
     const fingerprint = JSON.stringify([
       selectedModel.value,
       promptId,
       text,
       files.map((f) => f.id),
-      knowledgeEnabled.value,
+      useKnowledge,
     ])
     const requestId =
       retry?.conversationId === id && retry.fingerprint === fingerprint
@@ -112,13 +123,18 @@ export const useConsultationStore = defineStore('consultation', () => {
       prompt_id: promptId,
       text,
       attachment_ids: files.map((file) => file.id),
-      knowledge_enabled: knowledgeEnabled.value,
+      knowledge_enabled: useKnowledge,
     }
     generating.value = true
+    stopRequested.value = false
+    compressingContext.value = false
     draftQuestion.value = text
+    draftAttachments.value = [...files]
     draftAnswer.value = ''
+    draftReasoning.value = ''
     draftSources.value = []
-    controller = new AbortController()
+    const requestController = new AbortController()
+    controller = requestController
     let saved = false
     let rebuildRequired = false
     let failure: unknown
@@ -126,24 +142,62 @@ export const useConsultationStore = defineStore('consultation', () => {
       await postEventStream(
         `/consultation/conversations/${id}/stream`,
         data,
-        controller.signal,
+        requestController.signal,
         (options.value.policy.request_timeout + 15) * 1000,
         (event) => {
-          if (event.kind === 'delta' && isRecord(event.data) && typeof event.data.text === 'string')
-            draftAnswer.value += event.data.text
+          if (
+            event.kind === 'status' &&
+            isRecord(event.data) &&
+            (event.data.phase === 'compressing_context' || event.data.phase === 'generating')
+          )
+            compressingContext.value = event.data.phase === 'compressing_context'
           else if (
+            event.kind === 'reasoning_delta' &&
+            isRecord(event.data) &&
+            typeof event.data.text === 'string'
+          ) {
+            compressingContext.value = false
+            draftReasoning.value += event.data.text
+          } else if (
+            event.kind === 'delta' &&
+            isRecord(event.data) &&
+            typeof event.data.text === 'string'
+          ) {
+            compressingContext.value = false
+            draftAnswer.value += event.data.text
+          } else if (
             event.kind === 'sources' &&
             Array.isArray(event.data) &&
             event.data.every(isSource)
           )
             draftSources.value = event.data
           else if (event.kind === 'done' && isRecord(event.data) && isTurn(event.data.turn)) {
+            compressingContext.value = false
             const turn = event.data.turn
             saved = true
             rebuildRequired = event.data.memory_status === 'rebuild_required'
             if (!turns.value.some((row) => row.id === turn.id)) turns.value.push(turn)
+            const conversation = conversations.value.find((row) => row.id === id)
+            if (conversation) {
+              conversation.history_version = turn.sequence
+              conversation.updated_at = turn.created_at
+              if (turn.sequence === 1)
+                conversation.title = Array.from(turn.user_text).slice(0, 40).join('') || '附件咨询'
+              conversations.value = [
+                conversation,
+                ...conversations.value.filter((row) => row.id !== id),
+              ]
+            }
+            for (const file of attachments.value) {
+              if (turn.attachment_ids.includes(file.id)) file.bound = true
+            }
+            for (const file of files) {
+              if (!attachments.value.some((row) => row.id === file.id))
+                attachments.value.push({ ...file, bound: true })
+            }
             retry = undefined
           } else if (event.kind === 'error') {
+            compressingContext.value = false
             const message =
               isRecord(event.data) && typeof event.data.message === 'string'
                 ? event.data.message
@@ -155,27 +209,57 @@ export const useConsultationStore = defineStore('consultation', () => {
       if (!saved) throw new ApiError('回答连接中断，请重新发送', 'network')
     } catch (error: unknown) {
       failure = error
+    } finally {
+      compressingContext.value = false
     }
-    const cancelled = controller.signal.aborted
-    // 提交成功但 done 丢失时，以历史中的幂等 ID 确认结果，避免重复调用。
     try {
-      await refreshHistory()
-      saved ||= turns.value.some((row) => row.request_id === requestId)
-      if (saved) retry = undefined
-      conversations.value = await consultationApi.conversations()
+      // 正常完成直接使用 done 的完整消息，不重复读取历史和附件。
+      // 仅在 done 丢失时，以历史中的幂等 ID 确认结果，避免重复调用。
+      if (!saved) {
+        await refreshHistory()
+        saved = turns.value.some((row) => row.request_id === requestId)
+        if (saved) retry = undefined
+        conversations.value = await consultationApi.conversations()
+      }
     } catch (error: unknown) {
       failure ??= error
     } finally {
+      if (saved) {
+        stoppedTurns.value = stoppedTurns.value.filter((row) => row.request_id !== requestId)
+      } else if (requestController.signal.aborted) {
+        stoppedTurns.value = [
+          ...stoppedTurns.value.filter((row) => row.request_id !== requestId),
+          {
+            request_id: requestId,
+            conversation_id: id,
+            after_sequence: afterSequence,
+            user_text: draftQuestion.value,
+            answer: draftAnswer.value,
+            reasoning: draftReasoning.value,
+            attachments: [...draftAttachments.value],
+            sources: [...draftSources.value],
+            model_name: modelName,
+          },
+        ]
+      }
       generating.value = false
+      stopRequested.value = false
+      compressingContext.value = false
       controller = undefined
       draftQuestion.value = ''
+      draftAttachments.value = []
       draftAnswer.value = ''
+      draftReasoning.value = ''
       draftSources.value = []
     }
+    const cancelled = requestController.signal.aborted
     if (failure && !saved && !cancelled) throw failure
     return { saved, rebuildRequired, cancelled }
   }
   function stop(): void {
+    if (!controller || controller.signal.aborted) return
+    stopRequested.value = true
+    compressingContext.value = false
     controller?.abort()
   }
   return {
@@ -183,11 +267,16 @@ export const useConsultationStore = defineStore('consultation', () => {
     conversations,
     activeId,
     turns,
+    stoppedTurns,
     attachments,
     generating,
+    stopRequested,
+    compressingContext,
     loading,
     draftAnswer,
+    draftReasoning,
     draftQuestion,
+    draftAttachments,
     draftSources,
     selectedModel,
     knowledgeEnabled,

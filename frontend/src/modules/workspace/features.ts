@@ -16,8 +16,20 @@ export const workspaceFeatures: readonly WorkspaceFeature[] = [
     icon: 'chat',
     to: '/consultation',
   },
-  { id: 'search', title: '法律法规检索', description: '查询法律法规与司法解释。', icon: 'search' },
-  { id: 'knowledge', title: '法律知识库', description: '管理专业资料与法律知识。', icon: 'book' },
+  {
+    id: 'search',
+    title: '法律法规检索',
+    description: '查找法条、核对版本与原文引用。',
+    icon: 'search',
+    to: '/regulations',
+  },
+  {
+    id: 'knowledge',
+    title: '法律知识库',
+    description: '管理资料、法律版本与解析审核。',
+    icon: 'book',
+    to: '/knowledge',
+  },
   {
     id: 'documents',
     title: '法律文书分析',

@@ -26,11 +26,11 @@ Alembic 使用异步 online runner + `connection.run_sync`；离线支持 SQL �
 
 ## 后续业务与 AI
 
-当前已实现的 AI 咨询边界：`modules/system_config` 管理模型、加密 API Key、提示词版本和咨询策略，所有业务配置存 PostgreSQL；`modules/consultation` 管理完整会话历史、附件、生成占用和流式业务。`ai/providers` 适配 Chat Completions/Responses，`ai/retrieval` 仅接入外部检索接口或明确空库，`ai/prompts` 组装咨询及记忆指令。完整历史在 PostgreSQL，最近 N 轮、摘要、关键词和版本在 Redis，不创建数据库记忆表。
+当前已实现的 AI 咨询边界：`modules/system_config` 管理模型、加密 API Key、提示词版本、咨询策略及可用内部知识库列表，所有业务配置存 PostgreSQL；`modules/consultation` 管理完整会话历史、附件、生成占用和流式业务。`ai/providers` 适配 Chat Completions/Responses，`ai/retrieval` 保存来源结构，`ai/embeddings` 适配真实向量模型，`ai/prompts` 组装咨询及记忆指令。`modules/knowledge` 管理内部资料、审核发布及 BM25 与余弦混合召回；分词和 RRF 融合在业务层，词频统计和候选查询在 Repository，正式索引保存在 PostgreSQL。完整历史在 PostgreSQL，未压缩的对话、摘要、关键词和版本在 Redis，不创建数据库记忆表。每新增 N 轮完整对话，在下一次回答前整批合并进摘要，压缩节点为完成 N、2N、3N……轮之后。
 
 `0002_consultation.py` 定义实际业务表；本次未执行迁移。流式业务使用应用 session factory 管理短事务，模型调用期间不持有数据库事务。完整回答先提交 PostgreSQL，再发布 Redis 记忆；跨存储失败由历史版本检测与重建处理。凭据在 PostgreSQL 中使用 Fernet 加密，主密钥仅由后端环境配置加载。附件异步存储在被 Git 忽略的数据目录，后台清理任务使用独立 Session，并在 lifespan 退出时取消。
 
-未配置知识库 URL 时直接返回空库回复；外部知识库采用明确 HTTP 契约，检索故障与未命中区分。多模态能力按模型声明及真实供应商协议校验，不提供模拟法律输出。使用方式见 [法律咨询文档](legal-consultation.md)。
+咨询仅检索策略 `knowledge_base_ids` 所选内部库中已审核发布的资料：每路最多 50 个 BM25、余弦候选，经 RRF 合并后选择引用。空列表或已删除的所选库会提示重新配置，不退回全库检索。缺少可用向量索引时标注为关键词检索，并区分服务故障和真正未命中；咨询不再调用外部知识库接口。新增 `0005_hybrid_retrieval.py` 管理词频索引结构，历史索引由独立 Session 的后台任务分批补建，新发布索引在发布事务内完成。多模态能力按模型声明及真实供应商协议校验，不提供模拟法律输出。使用方式见 [法律咨询文档](legal-consultation.md)。
 
 新增真实身份业务时创建 `modules/identity`，按需加入 router/service/repository/models/schemas，集中注册路由。SQLAlchemy 2 模型继承 Base，提交对应迁移，禁止生产运行自动建表。
 前端同时增加 `modules/identity` 页面/API/状态；只把跨模块通用代码提取为公共组件。
@@ -40,7 +40,7 @@ Alembic 使用异步 online runner + `connection.run_sync`；离线支持 SQL �
 - `app/ai/providers`：模型供应商适配、异步调用、超时和规范化结果；通过配置注入凭据。
 - `app/ai/agents`：实际需要时接入 LangGraph 等编排，避免将 Web 请求和状态机绑定。
 - `app/ai/tools`：工具接口与执行边界，授权和审计由业务 Service 管理。
-- `app/ai/retrieval`：Embedding、向量库、RAG 检索；镜像已提供 pgvector 扩展文件，后续通过迁移在数据库中启用 `vector` 扩展，当前不启用或实现检索。
+- `app/ai/retrieval`：来源结构；`app/ai/embeddings`：向量供应商适配。内部检索业务位于 `modules/knowledge`，pgvector 由知识库迁移启用；本次不引入独立搜索服务、MMR 或 Reranker。
 - `app/ai/prompts`：版本化提示模板及元数据；禁止混入 API 密钥。
 
 chat/knowledge/documents/agents 等业务模块拥有自己的数据和流程，普通业务模块与 AI 公共能力保持边界。跨模块复用在有明确重复后再提取。后续另行设计认证、隔离、审计、后台执行和法律来源追溯，不在 Phase 1 做假实现。

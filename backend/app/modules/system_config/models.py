@@ -25,6 +25,10 @@ class ModelConfig(Base):
     max_output_tokens: Mapped[int] = mapped_column(default=4096)
     token_parameter: Mapped[str] = mapped_column(String(30), default="max_tokens")
     temperature: Mapped[float | None]
+    embedding_dimensions: Mapped[int | None]
+    embedding_batch_size: Mapped[int] = mapped_column(default=8, server_default="8")
+    embedding_timeout: Mapped[int] = mapped_column(default=90, server_default="90")
+    embedding_query_instruction: Mapped[str] = mapped_column(Text, default="", server_default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

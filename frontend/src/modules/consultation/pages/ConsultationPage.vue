@@ -4,6 +4,10 @@ import { NButton, NDropdown, NEmpty, NInput, NPopconfirm, NSpin, useMessage } fr
 import AppIcon from '../../../components/AppIcon.vue'
 import { useErrorMessage } from '../../../composables/useErrorMessage'
 import { consultationApi } from '../api'
+import ContextUsageIndicator from '../components/ContextUsageIndicator.vue'
+import MessageAttachment from '../components/MessageAttachment.vue'
+import MessageCopyButton from '../components/MessageCopyButton.vue'
+import ReasoningPanel from '../components/ReasoningPanel.vue'
 import { useConsultationStore } from '../store'
 import type { Attachment, Source, Turn } from '../types'
 
@@ -14,14 +18,54 @@ const text = ref('')
 const pending = ref<(Attachment & { preview?: string | undefined })[]>([])
 const uploading = ref(false)
 const picking = ref(false)
+const submitting = ref(false)
+let disposed = false
 const input = ref<HTMLInputElement>()
 const messageArea = ref<HTMLElement>()
 const modelOptions = computed(
   () => store.options?.models.map((m) => ({ label: m.name, key: m.id })) ?? [],
 )
 const configured = computed(() => modelOptions.value.length > 0)
-const inputTheme = { color: 'transparent', colorFocus: 'transparent', boxShadowFocus: 'none' }
-const busy = computed(() => store.generating || uploading.value || picking.value || store.loading)
+const chatTurns = computed(() =>
+  [
+    ...store.turns.map((turn) => ({
+      key: `saved-${turn.id}`,
+      user_text: turn.user_text,
+      answer: turn.answer,
+      reasoning: turn.reasoning ?? '',
+      files: turnAttachments(turn),
+      sources: turn.sources,
+      modelLabel: modelName(turn),
+      retrieval: retrievalLabel(turn),
+      stopped: false,
+      order: turn.sequence,
+    })),
+    ...store.stoppedTurns
+      .filter((turn) => turn.conversation_id === store.activeId)
+      .map((turn) => ({
+        key: `stopped-${turn.request_id}`,
+        user_text: turn.user_text,
+        answer: turn.answer,
+        reasoning: turn.reasoning,
+        files: turn.attachments,
+        sources: turn.sources,
+        modelLabel: turn.model_name,
+        retrieval: undefined,
+        stopped: true,
+        order: turn.after_sequence + 0.5,
+      })),
+  ].sort((left, right) => left.order - right.order),
+)
+const inputTheme = {
+  color: 'transparent',
+  colorHover: 'transparent',
+  colorFocus: 'transparent',
+  colorDisabled: 'transparent',
+  boxShadowFocus: 'none',
+}
+const busy = computed(
+  () => store.generating || submitting.value || uploading.value || picking.value || store.loading,
+)
 const accept = computed(() =>
   [
     store.model?.supports_images ? 'image/png,image/jpeg,image/webp' : '',
@@ -34,12 +78,31 @@ const accept = computed(() =>
 function selectModel(key: string | number): void {
   if (!busy.value) store.selectedModel = String(key)
 }
+function toggleKnowledge(): void {
+  if (busy.value) return
+  if (!store.knowledgeEnabled && !store.options?.policy.knowledge_base_ids?.length) {
+    message.warning('请先在法律咨询模型中添加内部知识库')
+    return
+  }
+  store.knowledgeEnabled = !store.knowledgeEnabled
+}
 
-function clearPending(): void {
-  pending.value.forEach((file) => {
+function releasePreviews(files: (Attachment & { preview?: string | undefined })[]): void {
+  files.forEach((file) => {
     if (file.preview) URL.revokeObjectURL(file.preview)
   })
+}
+function clearPending(): void {
+  releasePreviews(pending.value)
   pending.value = []
+}
+function unsentAttachments(): Attachment[] {
+  const stoppedIds = new Set(
+    store.stoppedTurns
+      .filter((turn) => turn.conversation_id === store.activeId)
+      .flatMap((turn) => turn.attachments.map((file) => file.id)),
+  )
+  return store.attachments.filter((file) => !file.bound && !stoppedIds.has(file.id))
 }
 async function select(id: string): Promise<void> {
   if (busy.value) return
@@ -48,7 +111,7 @@ async function select(id: string): Promise<void> {
     await store.select(id)
     clearPending()
     text.value = ''
-    pending.value = store.attachments.filter((file) => !file.bound)
+    pending.value = unsentAttachments()
   } catch (error: unknown) {
     showError(error)
   } finally {
@@ -69,6 +132,7 @@ async function removeConversation(id: string): Promise<void> {
   try {
     await consultationApi.delete(id)
     store.conversations = store.conversations.filter((row) => row.id !== id)
+    store.stoppedTurns = store.stoppedTurns.filter((turn) => turn.conversation_id !== id)
     if (store.activeId === id) {
       clearPending()
       text.value = ''
@@ -82,11 +146,28 @@ async function removeConversation(id: string): Promise<void> {
     picking.value = false
   }
 }
-async function upload(event: Event): Promise<void> {
+function upload(event: Event): void {
   const target = event.target
-  if (!(target instanceof HTMLInputElement) || !target.files || busy.value || !store.options) return
+  if (!(target instanceof HTMLInputElement) || !target.files) return
   const files = [...target.files]
   target.value = ''
+  void uploadFiles(files)
+}
+function pasteAttachments(event: ClipboardEvent): void {
+  const clipboard = event.clipboardData
+  if (!clipboard || busy.value || !configured.value) return
+  const files = [...clipboard.items]
+    .filter((item) => item.kind === 'file')
+    .map((item) => item.getAsFile())
+    .filter((file): file is File => file !== null)
+  if (!files.length) files.push(...clipboard.files)
+  if (!files.length) return
+  // 混合粘贴时保留文本框默认的文字粘贴行为。
+  if (!clipboard.getData('text/plain')) event.preventDefault()
+  void uploadFiles(files)
+}
+async function uploadFiles(files: File[]): Promise<void> {
+  if (!files.length || busy.value || !configured.value || !store.options) return
   const policy = store.options.policy
   if (pending.value.length + files.length > policy.max_attachments) {
     message.warning(`最多上传 ${policy.max_attachments} 个附件`)
@@ -146,40 +227,33 @@ async function removeAttachment(file: Attachment): Promise<void> {
 }
 async function send(): Promise<void> {
   if (busy.value || !configured.value || (!text.value.trim() && !pending.value.length)) return
-  if (store.knowledgeEnabled && !text.value.trim()) {
-    message.warning('请填写文字问题以查询知识库')
-    return
-  }
+  const question = text.value
+  const files = pending.value
+  submitting.value = true
+  text.value = ''
+  pending.value = []
+  let retainedInChat = false
   try {
-    const result = await store.send(text.value.trim(), pending.value)
-    if (result.saved) {
-      text.value = ''
-      clearPending()
-    }
+    const result = await store.send(question.trim(), files)
+    retainedInChat = result.saved || result.cancelled
+    if (disposed) return
     if (result.rebuildRequired) message.warning('回答已保存，会话记忆将在下次对话时恢复')
     else if (result.cancelled && !result.saved) message.info('已停止生成')
   } catch (error: unknown) {
-    showError(error)
+    if (!disposed) showError(error)
+  } finally {
+    if (retainedInChat || disposed) releasePreviews(files)
+    else {
+      text.value = question
+      pending.value = files
+    }
+    submitting.value = false
   }
 }
 function keydown(event: KeyboardEvent): void {
-  if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
-    event.preventDefault()
-    void send()
-  }
-}
-async function download(file: Attachment): Promise<void> {
-  try {
-    const blob = await consultationApi.downloadAttachment(file.id)
-    const url = URL.createObjectURL(blob)
-    const link = document.createElement('a')
-    link.href = url
-    link.download = file.name
-    link.click()
-    setTimeout(() => URL.revokeObjectURL(url), 1000)
-  } catch (error: unknown) {
-    showError(error)
-  }
+  if (event.key !== 'Enter' || event.shiftKey || event.isComposing || event.keyCode === 229) return
+  event.preventDefault()
+  if (!event.repeat) void send()
 }
 function turnAttachments(turn: Turn): Attachment[] {
   return store.attachments.filter((file) => turn.attachment_ids.includes(file.id))
@@ -193,7 +267,17 @@ function modelName(turn: Turn): string {
     ? model.name
     : '法律对话'
 }
+function retrievalLabel(turn: Turn): string | undefined {
+  const method = turn.config_snapshot.retrieval_method
+  if (method === 'hybrid') return '关键词与语义混合检索'
+  if (method === 'keyword') return '关键词检索（暂无可用向量索引）'
+  if (method === 'external') return '外部知识库'
+  return undefined
+}
 function sourceUrl(source: Source): string | undefined {
+  if (/^\/knowledge\/[\da-f-]{36}\/documents\/[\da-f-]{36}$/i.test(source.source)) {
+    return source.source
+  }
   try {
     const url = new URL(source.source)
     return ['https:', 'http:'].includes(url.protocol) ? url.href : undefined
@@ -210,7 +294,7 @@ async function loadMore(): Promise<void> {
   }
 }
 watch(
-  () => [store.draftAnswer, store.turns.length],
+  () => [store.draftAnswer, store.draftReasoning, chatTurns.value.length],
   async () => {
     await nextTick()
     messageArea.value?.scrollTo({ top: messageArea.value.scrollHeight })
@@ -221,13 +305,14 @@ onMounted(async () => {
     await store.initialize()
     if (store.activeId) {
       await store.refreshHistory()
-      pending.value = store.attachments.filter((file) => !file.bound)
+      pending.value = unsentAttachments()
     }
   } catch (error: unknown) {
     showError(error)
   }
 })
 onBeforeUnmount(() => {
+  disposed = true
   store.stop()
   clearPending()
 })
@@ -248,7 +333,7 @@ onBeforeUnmount(() => {
             class="conversation-item"
             :class="{ active: store.activeId === row.id }"
           >
-            <button :disabled="busy" @click="select(row.id)">
+            <button :disabled="busy" :title="row.title" @click="select(row.id)">
               <AppIcon name="chat" :size="16" /><span>{{ row.title }}</span></button
             ><NPopconfirm @positive-click="removeConversation(row.id)"
               ><template #trigger
@@ -287,32 +372,36 @@ onBeforeUnmount(() => {
               >前往系统配置 <AppIcon name="arrow-right" :size="16"
             /></RouterLink>
           </div>
-          <div v-else-if="!store.turns.length && !store.generating" class="consultation-welcome">
+          <div v-else-if="!chatTurns.length && !store.generating" class="consultation-welcome">
             <h2>有什么法律问题想聊？</h2>
             <p>可以直接提问，也可以添加图片或 PDF。</p>
           </div>
-          <article v-for="turn in store.turns" :key="turn.id" class="conversation-turn">
+          <article v-for="turn in chatTurns" :key="turn.key" class="conversation-turn">
             <div class="user-message">
-              <span class="message-role">你</span>
-              <p class="message-text">{{ turn.user_text }}</p>
-              <div v-if="turn.attachment_ids.length" class="message-files">
-                <NButton
-                  v-for="file in turnAttachments(turn)"
-                  :key="file.id"
-                  size="small"
-                  secondary
-                  @click="download(file)"
-                  ><AppIcon name="document" :size="15" />{{ file.name }}</NButton
-                >
+              <div class="message-header">
+                <span class="message-role">你</span>
+                <MessageCopyButton :text="turn.user_text" label="复制提问" />
+              </div>
+              <p v-if="turn.user_text" class="message-text">{{ turn.user_text }}</p>
+              <div v-if="turn.files.length" class="message-files">
+                <MessageAttachment v-for="file in turn.files" :key="file.id" :file="file" />
               </div>
             </div>
             <div class="assistant-message">
-              <span class="message-role"
-                ><AppIcon name="column" :size="18" />{{ modelName(turn) }}</span
-              >
-              <p class="message-text">{{ turn.answer }}</p>
+              <div class="message-header">
+                <span class="message-role"
+                  ><AppIcon name="column" :size="18" />{{ turn.modelLabel
+                  }}<span v-if="turn.stopped" class="live-label">已停止</span></span
+                >
+                <MessageCopyButton :text="turn.answer" label="复制回答" />
+              </div>
+              <ReasoningPanel v-if="turn.reasoning" :content="turn.reasoning" />
+              <p v-if="turn.answer" class="message-text">{{ turn.answer }}</p>
               <details v-if="turn.sources.length" class="answer-sources">
-                <summary>知识来源 · {{ turn.sources.length }}</summary>
+                <summary>
+                  知识来源 · {{ turn.sources.length }}
+                  <span v-if="turn.retrieval"> · {{ turn.retrieval }}</span>
+                </summary>
                 <div v-for="(source, index) in turn.sources" :key="`${source.id}-${index}`">
                   <strong>[{{ index + 1 }}] {{ source.title }}</strong
                   ><a
@@ -328,18 +417,45 @@ onBeforeUnmount(() => {
           </article>
           <article v-if="store.generating" class="conversation-turn live-turn">
             <div class="user-message">
-              <span class="message-role">你</span>
-              <p class="message-text">{{ store.draftQuestion || '附件对话' }}</p>
+              <div class="message-header">
+                <span class="message-role">你</span>
+                <MessageCopyButton :text="store.draftQuestion" label="复制提问" />
+              </div>
+              <p v-if="store.draftQuestion" class="message-text">{{ store.draftQuestion }}</p>
+              <div v-if="store.draftAttachments.length" class="message-files">
+                <MessageAttachment
+                  v-for="file in store.draftAttachments"
+                  :key="file.id"
+                  :file="file"
+                />
+              </div>
             </div>
             <div class="assistant-message">
-              <span class="message-role"
-                ><AppIcon name="column" :size="18" />{{ store.model?.name
-                }}<span class="live-label">生成中</span></span
-              >
+              <div class="message-header">
+                <span class="message-role"
+                  ><AppIcon name="column" :size="18" />{{ store.model?.name
+                  }}<span class="live-label" role="status" aria-live="polite">{{
+                    store.stopRequested
+                      ? '已停止'
+                      : store.compressingContext
+                        ? '压缩上下文'
+                        : store.draftReasoning && !store.draftAnswer
+                          ? '思考中'
+                          : '生成中'
+                  }}</span></span
+                >
+                <MessageCopyButton :text="store.draftAnswer" label="复制当前回答" />
+              </div>
+              <ReasoningPanel
+                v-if="store.draftReasoning"
+                :content="store.draftReasoning"
+                :active="!store.draftAnswer && !store.stopRequested"
+              />
               <p v-if="store.draftAnswer" class="message-text">
-                {{ store.draftAnswer }}<span class="stream-caret" aria-hidden="true" />
+                {{ store.draftAnswer
+                }}<span v-if="!store.stopRequested" class="stream-caret" aria-hidden="true" />
               </p>
-              <NSpin v-else size="small" />
+              <NSpin v-else-if="!store.stopRequested && !store.draftReasoning" size="small" />
             </div>
           </article>
         </div>
@@ -370,11 +486,12 @@ onBeforeUnmount(() => {
               :autosize="{ minRows: 2, maxRows: 8 }"
               :bordered="false"
               :theme-overrides="inputTheme"
+              :input-props="{ onKeydown: keydown, enterkeyhint: 'send' }"
               maxlength="30000"
               :disabled="busy || !configured"
-              placeholder="输入问题，或添加图片、PDF…"
-              aria-label="对话内容，Enter 发送，Shift + Enter 换行"
-              @keydown="keydown"
+              placeholder="输入问题，或粘贴图片、PDF…"
+              aria-label="对话内容，支持粘贴附件，Enter 发送，Shift + Enter 换行"
+              @paste="pasteAttachments"
             />
             <div class="composer-actions">
               <div class="composer-attachments">
@@ -397,6 +514,15 @@ onBeforeUnmount(() => {
                 /></NButton>
               </div>
               <div class="composer-options">
+                <ContextUsageIndicator
+                  :model="store.model"
+                  :conversation-id="store.activeId"
+                  :history-version="store.turns.at(-1)?.sequence ?? 0"
+                  :text="text"
+                  :attachment-ids="pending.map((file) => file.id)"
+                  :knowledge-enabled="store.knowledgeEnabled && !!text.trim()"
+                  :busy="busy"
+                />
                 <NDropdown
                   trigger="click"
                   placement="top-end"
@@ -424,7 +550,7 @@ onBeforeUnmount(() => {
                   :disabled="busy"
                   :aria-pressed="store.knowledgeEnabled"
                   :title="store.knowledgeEnabled ? '关闭知识库' : '启用知识库'"
-                  @click="store.knowledgeEnabled = !store.knowledgeEnabled"
+                  @click="toggleKnowledge"
                 >
                   <AppIcon name="book" :size="16" /><span>知识库</span
                   ><span class="knowledge-dot" aria-hidden="true" />
@@ -435,6 +561,7 @@ onBeforeUnmount(() => {
                   type="button"
                   aria-label="停止生成"
                   title="停止生成"
+                  :disabled="store.stopRequested"
                   @click="store.stop"
                 >
                   <span class="stop-mark" aria-hidden="true" />
@@ -445,7 +572,7 @@ onBeforeUnmount(() => {
                   type="button"
                   :disabled="busy || !configured || (!text.trim() && !pending.length)"
                   aria-label="发送消息"
-                  title="发送消息"
+                  title="发送消息（Enter）"
                   @click="send"
                 >
                   <AppIcon name="arrow-up" :size="20" />

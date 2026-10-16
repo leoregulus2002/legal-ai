@@ -43,7 +43,19 @@ def register_exception_handlers(app: FastAPI) -> None:
     async def validation_error_handler(
         request: Request, exc: RequestValidationError
     ) -> JSONResponse:
-        return error_response(request, 422, "validation_error", "请求参数格式错误，请检查请求内容")
+        errors = exc.errors()
+        # 只返回代码中明确标记的用户提示，避免回显校验输入、密钥或原始异常。
+        message = next(
+            (str(error["msg"]) for error in errors if error["type"] == "user_input"),
+            "请求参数格式错误，请检查请求内容",
+        )
+        logger.info(
+            "请求参数校验失败 count=%s types=%s request_id=%s",
+            len(errors),
+            ",".join(sorted({str(error["type"]) for error in errors})),
+            getattr(request.state, "request_id", None),
+        )
+        return error_response(request, 422, "validation_error", message)
 
     @app.exception_handler(Exception)
     async def unexpected_error_handler(request: Request, exc: Exception) -> JSONResponse:

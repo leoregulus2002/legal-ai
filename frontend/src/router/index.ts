@@ -21,6 +21,36 @@ export const router = createRouter({
           meta: { title: 'AI 法律对话' },
         },
         {
+          path: 'regulations',
+          name: 'regulations',
+          component: () => import('../modules/regulations/pages/RegulationSearchPage.vue'),
+          meta: { title: '法律法规检索' },
+        },
+        {
+          path: 'regulations/:documentId',
+          name: 'regulation-detail',
+          component: () => import('../modules/regulations/pages/RegulationDetailPage.vue'),
+          meta: { title: '法规原文' },
+        },
+        {
+          path: 'knowledge',
+          name: 'knowledge',
+          component: () => import('../modules/knowledge/pages/KnowledgePage.vue'),
+          meta: { title: '法律知识库' },
+        },
+        {
+          path: 'knowledge/:baseId',
+          name: 'knowledge-base',
+          component: () => import('../modules/knowledge/pages/KnowledgeBasePage.vue'),
+          meta: { title: '文档管理' },
+        },
+        {
+          path: 'knowledge/:baseId/documents/:documentId',
+          name: 'knowledge-document',
+          component: () => import('../modules/knowledge/pages/DocumentPage.vue'),
+          meta: { title: '文档解析与审核' },
+        },
+        {
           path: 'settings/models',
           name: 'model-config',
           component: () => import('../modules/system-config/pages/ModelsPage.vue'),

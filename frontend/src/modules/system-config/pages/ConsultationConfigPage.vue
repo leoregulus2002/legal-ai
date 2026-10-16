@@ -1,29 +1,19 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
-import {
-  NButton,
-  NCheckbox,
-  NForm,
-  NFormItem,
-  NInput,
-  NInputNumber,
-  NSelect,
-  NSpin,
-  useMessage,
-} from 'naive-ui'
+import { NButton, NForm, NFormItem, NInputNumber, NSelect, NSpin, useMessage } from 'naive-ui'
 import { useErrorMessage } from '../../../composables/useErrorMessage'
+import { knowledgeApi } from '../../knowledge/api'
+import type { KnowledgeBase } from '../../knowledge/types'
 import { configApi } from '../api'
 import { defaultPolicy, type ModelConfig, type PolicyInput, type SystemPrompt } from '../types'
 
 const models = ref<ModelConfig[]>([])
 const prompts = ref<SystemPrompt[]>([])
-const form = reactive<
-  PolicyInput & { knowledge_api_key: string; clear_knowledge_api_key: boolean }
->({ ...defaultPolicy(), knowledge_api_key: '', clear_knowledge_api_key: false })
+const knowledgeBases = ref<KnowledgeBase[]>([])
+const form = reactive<PolicyInput>(defaultPolicy())
 const ready = ref(false)
 const loading = ref(false)
 const saving = ref(false)
-const keyConfigured = ref(false)
 const showError = useErrorMessage()
 const message = useMessage()
 const modelOptions = computed(() =>
@@ -39,6 +29,20 @@ const promptOptions = computed(() =>
     .filter((p) => p.enabled)
     .map((p) => ({ label: `${p.name} · v${p.version}`, value: p.id })),
 )
+const knowledgeOptions = computed(() => [
+  ...knowledgeBases.value.map((base) => ({ label: base.name, value: base.id })),
+  ...form.knowledge_base_ids
+    .filter((id) => !knowledgeBases.value.some((base) => base.id === id))
+    .map((id) => ({ label: '已删除的知识库（请移除）', value: id })),
+])
+async function loadKnowledgeBases(): Promise<KnowledgeBase[]> {
+  const rows: KnowledgeBase[] = []
+  for (let page = 1; ; page++) {
+    const result = await knowledgeApi.bases('', page, 100)
+    rows.push(...result.items)
+    if (rows.length >= result.total || result.items.length < 100) return rows
+  }
+}
 function changeModels(ids: string[]): void {
   form.allowed_model_ids = ids
   if (form.default_model_id && !ids.includes(form.default_model_id)) form.default_model_id = null
@@ -46,15 +50,16 @@ function changeModels(ids: string[]): void {
 async function load(): Promise<void> {
   loading.value = true
   try {
-    const [modelRows, promptRows, policy] = await Promise.all([
+    const [modelRows, promptRows, policy, bases] = await Promise.all([
       configApi.models(),
       configApi.prompts(),
       configApi.policy(),
+      loadKnowledgeBases(),
     ])
     models.value = modelRows
     prompts.value = promptRows
-    Object.assign(form, policy, { knowledge_api_key: '', clear_knowledge_api_key: false })
-    keyConfigured.value = policy.has_knowledge_api_key
+    knowledgeBases.value = bases
+    Object.assign(form, policy)
     ready.value = true
   } catch (error: unknown) {
     showError(error)
@@ -63,15 +68,11 @@ async function load(): Promise<void> {
   }
 }
 async function save(): Promise<void> {
+  if (saving.value || loading.value || !ready.value) return
   saving.value = true
   try {
-    const { knowledge_api_key, ...data } = form
-    const policy = await configApi.savePolicy(
-      knowledge_api_key && !form.clear_knowledge_api_key ? { ...data, knowledge_api_key } : data,
-    )
-    keyConfigured.value = policy.has_knowledge_api_key
-    form.knowledge_api_key = ''
-    form.clear_knowledge_api_key = false
+    const policy = await configApi.savePolicy(form)
+    Object.assign(form, policy)
     message.success('法律咨询配置已保存')
   } catch (error: unknown) {
     showError(error)
@@ -125,9 +126,12 @@ onMounted(() => {
         </section>
         <section class="form-section">
           <h2>会话记忆</h2>
-          <p>运行记忆保存在 Redis，过期后从已完成的聊天历史恢复。</p>
+          <p>
+            每累计完成 N 轮对话，在下一次回答前压缩一次，按 N、2N、3N……轮分批合并到摘要。
+            两次压缩之间保留完整原文。运行记忆过期后从聊天历史恢复。
+          </p>
           <div class="form-grid">
-            <NFormItem label="保留最近 N 轮"
+            <NFormItem label="上下文压缩间隔（N 轮）"
               ><NInputNumber v-model:value="form.recent_turns" :min="1" :max="30" /></NFormItem
             ><NFormItem label="摘要字数上限"
               ><NInputNumber
@@ -144,35 +148,43 @@ onMounted(() => {
         </section>
         <section class="form-section">
           <h2>知识库接入</h2>
-          <p>接口留空视为空库；启用知识库且没有命中时，回复“知识库找不到对应信息”。</p>
-          <NFormItem label="检索接口地址"
-            ><NInput
-              v-model:value="form.knowledge_url"
-              placeholder="填写外部知识库 HTTP 检索接口" /></NFormItem
-          ><NFormItem :label="keyConfigured ? '知识库 API Key（留空保留）' : '知识库 API Key'"
-            ><NInput
-              v-model:value="form.knowledge_api_key"
-              type="password"
-              show-password-on="click"
-              autocomplete="new-password"
-              :disabled="form.clear_knowledge_api_key"
-              placeholder="可选，加密保存" /></NFormItem
-          ><NCheckbox v-if="keyConfigured" v-model:checked="form.clear_knowledge_api_key"
-            >清除现有知识库密钥</NCheckbox
-          >
+          <p>
+            添加已有的内部知识库，法律对话仅检索所选库中已审核发布的资料。
+            <RouterLink to="/knowledge">管理内部知识库</RouterLink>
+          </p>
+          <NFormItem label="添加内部知识库"
+            ><NSelect
+              v-model:value="form.knowledge_base_ids"
+              multiple
+              filterable
+              clearable
+              :max="100"
+              :max-tag-count="3"
+              :options="knowledgeOptions"
+              placeholder="选择一个或多个内部知识库"
+            />
+          </NFormItem>
+          <p v-if="!knowledgeBases.length">还没有内部知识库，可先前往知识库页面创建并发布资料。</p>
           <div class="form-grid">
-            <NFormItem label="相关度阈值（0–1）"
+            <NFormItem label="最低向量相似度（0–1）"
               ><NInputNumber
-                v-model:value="form.knowledge_threshold"
+                v-model:value="form.knowledge_vector_threshold"
+                :min="0"
+                :max="1"
+                :step="0.05" /></NFormItem
+            ><NFormItem label="最低关键词覆盖率（0–1）"
+              ><NInputNumber
+                v-model:value="form.knowledge_keyword_threshold"
                 :min="0"
                 :max="1"
                 :step="0.05" /></NFormItem
             ><NFormItem label="最多引用资料数"
-              ><NInputNumber v-model:value="form.knowledge_limit" :min="1" :max="20" /></NFormItem
-            ><NFormItem label="检索超时（秒）"
-              ><NInputNumber v-model:value="form.knowledge_timeout" :min="1" :max="120"
+              ><NInputNumber v-model:value="form.knowledge_limit" :min="1" :max="20"
             /></NFormItem>
           </div>
+          <p>
+            内部知识库合并关键词和语义检索结果；暂无可用向量索引时使用关键词检索。两类门槛分别控制候选范围，最终按融合排名选择引用。
+          </p>
         </section>
         <section class="form-section">
           <h2>附件与生成</h2>
