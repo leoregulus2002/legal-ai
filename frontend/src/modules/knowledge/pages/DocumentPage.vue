@@ -110,6 +110,8 @@ const auditLabels: Record<string, string> = {
   EMBED_COMPLETE: '向量化完成',
   EMBED_FAILED: '向量化未完成',
   DELETE_DOCUMENT: '删除文档',
+  IMPORT_PUBLIC_LAW: '导入公开法规',
+  SYNC_SOURCE_METADATA: '同步官网元数据',
 }
 const dirty = computed(() => {
   if (!detail.value?.result || !document.value) return false
@@ -127,6 +129,61 @@ let timer: ReturnType<typeof setTimeout> | undefined
 let disposed = false
 let refreshing = false
 let pollFailed = false
+let autoSourceAttempted = false
+
+async function completeSourceMetadata(result: DocumentDetail): Promise<DocumentDetail> {
+  const row = result.document
+  if (
+    autoSourceAttempted ||
+    !row.public_law_id ||
+    row.source_metadata ||
+    !result.result ||
+    isProcessing(row) ||
+    !['NEEDS_REVIEW', 'READY'].includes(row.status)
+  )
+    return result
+  autoSourceAttempted = true
+  try {
+    return await knowledgeApi.syncSourceMetadata(
+      baseId.value,
+      row.id,
+      row.public_law_id,
+      row.revision,
+    )
+  } catch (error: unknown) {
+    if (!disposed) showError(error)
+    return result
+  }
+}
+
+async function syncSourceMetadata(): Promise<void> {
+  const row = document.value
+  if (!row?.public_law_id || disabled.value) return
+  if (dirty.value) {
+    message.warning('请先保存当前修订，再同步官网信息')
+    return
+  }
+  clearTimeout(timer)
+  saving.value = true
+  try {
+    const result = await knowledgeApi.syncSourceMetadata(
+      baseId.value,
+      row.id,
+      row.public_law_id,
+      row.revision,
+    )
+    if (disposed) return
+    apply(result)
+    if (activeTab.value === 'segments') await loadSegments()
+    message.success('官网信息已同步，人工修订与版本确认状态已保留')
+  } catch (error: unknown) {
+    if (!disposed) showError(error)
+  } finally {
+    saving.value = false
+    schedule()
+  }
+}
+
 function apply(result: DocumentDetail): void {
   detail.value = result
   nodes.value = structuredClone(result.result?.nodes ?? [])
@@ -162,7 +219,9 @@ async function poll(): Promise<void> {
     pollFailed = false
     const changed = row.revision !== detail.value.document.revision || !isProcessing(row)
     if (changed) {
-      const next = await knowledgeApi.detail(baseId.value, documentId.value)
+      const next = await completeSourceMetadata(
+        await knowledgeApi.detail(baseId.value, documentId.value),
+      )
       if (disposed) return
       apply(next)
       if (activeTab.value === 'segments') await loadSegments()
@@ -182,7 +241,9 @@ async function load(): Promise<void> {
   clearTimeout(timer)
   loading.value = true
   try {
-    const result = await knowledgeApi.detail(baseId.value, documentId.value)
+    const result = await completeSourceMetadata(
+      await knowledgeApi.detail(baseId.value, documentId.value),
+    )
     if (disposed) return
     apply(result)
     schedule()
@@ -402,6 +463,20 @@ onUnmounted(() => {
             </p>
           </div>
           <div class="kb-actions">
+            <NButton
+              v-if="document.public_law_id"
+              :disabled="
+                disabled ||
+                dirty ||
+                !detail?.result ||
+                document.status === 'PUBLISHED' ||
+                document.status === 'FAILED'
+              "
+              :loading="saving"
+              :title="document.status === 'PUBLISHED' ? '请先撤回发布后同步官网信息' : undefined"
+              @click="syncSourceMetadata"
+              >同步官网信息</NButton
+            >
             <NButton @click="download">下载原件</NButton
             ><NButton :disabled="saving || loading" @click="load">刷新</NButton>
           </div>
@@ -449,6 +524,9 @@ onUnmounted(() => {
               ><div class="kb-review-grid">
                 <div class="kb-panel kb-form">
                   <h3>{{ document.mode === 'LEGAL' ? '法律元数据' : '文档信息' }}</h3>
+                  <p v-if="document.source_metadata" class="kb-note">
+                    已补充官网提供的信息，人工修改的字段会保留；法律版本仍需对照原件确认。
+                  </p>
                   <label
                     >名称<NInput
                       v-model:value="metadata.title"

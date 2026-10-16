@@ -6,6 +6,7 @@ from uuid import UUID
 
 import anyio
 from psycopg import Error as PsycopgError
+from pydantic import TypeAdapter
 from sqlalchemy.exc import DBAPIError, ProgrammingError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -13,11 +14,13 @@ from app.common.exceptions import AppError
 from app.core.config import Settings
 from app.modules.knowledge.chunking import split_document
 from app.modules.knowledge.extraction import extract
+from app.modules.knowledge.metadata import merge_source_metadata
 from app.modules.knowledge.models import KnowledgeDocument, ParseRevision
 from app.modules.knowledge.parser import parse
 from app.modules.knowledge.repository import KnowledgeRepository
-from app.modules.knowledge.schemas import ParseIssue, ParseResult
+from app.modules.knowledge.schemas import LegalStatus, ParseIssue, ParseResult, SourceMetadata
 from app.modules.knowledge.service import KnowledgeService, ready_status, review_state
+from app.modules.knowledge.validation import validate_structure
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +58,14 @@ class KnowledgeWorker:
             if not row or row.processing_token != token:
                 return
             filename, mode, data = row.filename, row.mode, await repo.original(document_id)
+            source_metadata = (
+                SourceMetadata.model_validate(row.source_metadata) if row.source_metadata else None
+            )
+            snapshot = await repo.snapshot(row.id, row.revision)
+            previous = ParseResult.model_validate(snapshot.result) if snapshot else None
+            previous_status = TypeAdapter(LegalStatus).validate_python(
+                snapshot.review_state.get("legal_status", "UNKNOWN") if snapshot else "UNKNOWN"
+            )
         async with asyncio.timeout(240):
             extracted = await anyio.to_thread.run_sync(
                 extract, filename, data, abandon_on_cancel=True
@@ -62,6 +73,8 @@ class KnowledgeWorker:
         if not await self.stage(base_id, document_id, token, "STRUCTURING"):
             return
         result = await anyio.to_thread.run_sync(parse, extracted, mode)
+        merge_source_metadata(result, source_metadata, previous)
+        result.issues = await anyio.to_thread.run_sync(validate_structure, result, mode)
         if not await self.stage(base_id, document_id, token, "CHUNKING"):
             return
         segments = await anyio.to_thread.run_sync(split_document, result, mode)
@@ -73,6 +86,10 @@ class KnowledgeWorker:
             row.revision += 1
             revision = row.revision
             row.legal_metadata = result.metadata.model_dump(mode="json")
+            if source_metadata and result.metadata_sources.get("legal_status") == "OFFICIAL":
+                row.legal_status = source_metadata.legal_status
+            elif result.metadata_sources.get("legal_status") == "HUMAN":
+                row.legal_status = previous_status
             row.content_hash = hashlib.sha256(result.text.encode()).hexdigest()
             row.chunk_total, row.chunk_count, row.embedded_count = len(segments), 0, 0
             row.embedding_dimensions, row.embedding_fingerprint = None, None
@@ -201,6 +218,17 @@ class KnowledgeWorker:
                         )
                     ],
                 )
+                snapshot = await repo.snapshot(row.id, row.revision)
+                if snapshot:
+                    previous = ParseResult.model_validate(snapshot.result)
+                    result.metadata = previous.metadata.model_copy(deep=True)
+                    result.metadata_sources = previous.metadata_sources.copy()
+                    merge_source_metadata(result, None, previous)
+                failure_review_state = review_state(row)
+                if snapshot and result.metadata_sources.get("legal_status") == "HUMAN":
+                    failure_review_state["legal_status"] = snapshot.review_state.get(
+                        "legal_status", "UNKNOWN"
+                    )
                 result.issues = result.extraction_issues
                 row.revision += 1
                 await repo.save(
@@ -208,7 +236,7 @@ class KnowledgeWorker:
                         document_id=row.id,
                         revision=row.revision,
                         result=result.model_dump(mode="json"),
-                        review_state=review_state(row),
+                        review_state=failure_review_state,
                         acknowledged_issues=[],
                     )
                 )

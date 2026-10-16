@@ -69,6 +69,8 @@ export interface KnowledgeDocument {
   status: DocumentStatus
   source_kind: SourceKind
   source_url: string
+  public_law_id: string | null
+  source_metadata: SourceMetadata | null
   source_note: string
   verification_note: string
   legal_status: LegalStatus
@@ -117,8 +119,15 @@ export interface ParseResult {
   spans: { kind: string; index: number; start: number; end: number }[]
   nodes: StructureNode[]
   metadata: LegalMetadata
+  metadata_sources: Record<string, 'TEXT' | 'OFFICIAL' | 'HUMAN'>
   anchors: { field: string; start: number; end: number; text: string }[]
   issues: ParseIssue[]
+}
+export interface SourceMetadata {
+  metadata: LegalMetadata
+  legal_status: LegalStatus
+  source_url: string
+  fetched_at: string
 }
 export interface DocumentDetail {
   document: KnowledgeDocument

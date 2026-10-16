@@ -14,6 +14,7 @@ from app.core.config import Settings
 from app.core.secrets import decrypt
 from app.modules.knowledge.chunking import split_document
 from app.modules.knowledge.extraction import MEDIA_TYPES
+from app.modules.knowledge.metadata import has_metadata_value, merge_source_metadata
 from app.modules.knowledge.models import (
     KnowledgeAudit,
     KnowledgeBase,
@@ -45,6 +46,7 @@ from app.modules.knowledge.schemas import (
     SearchPage,
     SegmentPage,
     SegmentView,
+    SourceMetadata,
     VectorizeInput,
     VersionCandidate,
 )
@@ -55,8 +57,18 @@ from app.modules.system_config.schemas import Policy
 
 
 def document_view(row: KnowledgeDocument) -> DocumentView:
-    values = {name: getattr(row, name) for name in DocumentView.model_fields if name != "metadata"}
-    return DocumentView(**values, metadata=LegalMetadata.model_validate(row.legal_metadata))
+    values = {
+        name: getattr(row, name)
+        for name in DocumentView.model_fields
+        if name not in {"metadata", "source_metadata"}
+    }
+    return DocumentView(
+        **values,
+        metadata=LegalMetadata.model_validate(row.legal_metadata),
+        source_metadata=SourceMetadata.model_validate(row.source_metadata)
+        if row.source_metadata
+        else None,
+    )
 
 
 def review_state(row: KnowledgeDocument) -> dict[str, object]:
@@ -209,16 +221,38 @@ class KnowledgeService:
     ) -> DocumentView:
         # 大文件读取不占用知识库行锁，保存时再检查删除竞态。
         await self.base(base_id)
-        filename = Path((upload.filename or "document.txt").replace("\\", "/")).name
-        suffix = Path(filename).suffix.lower()
-        if suffix not in MEDIA_TYPES:
-            raise AppError("unsupported_document", "支持 PDF、DOCX、TXT、Markdown 和 HTML 文件")
-        filename = filename[: 240 - len(suffix)] + suffix if len(filename) > 240 else filename
         data = bytearray()
         while chunk := await upload.read(65536):
             data.extend(chunk)
             if len(data) > 25 * 1024 * 1024:
                 raise AppError("document_too_large", "单个文件不能超过 25 MB")
+        return await self.upload_content(
+            base_id,
+            upload.filename or "document.txt",
+            bytes(data),
+            mode,
+            source_url,
+            source_note,
+            model_id,
+        )
+
+    async def upload_content(
+        self,
+        base_id: UUID,
+        filename: str,
+        data: bytes,
+        mode: str,
+        source_url: str,
+        source_note: str,
+        model_id: UUID | None,
+    ) -> DocumentView:
+        filename = Path(filename.replace("\\", "/")).name
+        suffix = Path(filename).suffix.lower()
+        if suffix not in MEDIA_TYPES:
+            raise AppError("unsupported_document", "支持 PDF、DOCX、TXT、Markdown 和 HTML 文件")
+        filename = filename[: 240 - len(suffix)] + suffix if len(filename) > 240 else filename
+        if len(data) > 25 * 1024 * 1024:
+            raise AppError("document_too_large", "单个文件不能超过 25 MB")
         if not data:
             raise AppError("empty_document", "文件为空，请重新选择")
         if model_id:
@@ -297,7 +331,12 @@ class KnowledgeService:
         row.updated_at = datetime.now(UTC)
 
     async def correct(
-        self, base_id: UUID, document_id: UUID, data: CorrectionInput
+        self,
+        base_id: UUID,
+        document_id: UUID,
+        data: CorrectionInput,
+        *,
+        source_update: SourceMetadata | None = None,
     ) -> DocumentDetail:
         row = await self.document(base_id, document_id, lock=True)
         self.require_revision(row, data.expected_revision)
@@ -306,10 +345,37 @@ class KnowledgeService:
         if previous is None:
             raise AppError("parse_required", "请先重新解析文档")
         result = ParseResult.model_validate(previous.result)
-        result.metadata, result.nodes, result.method = data.metadata, data.nodes, "HUMAN"
+        if source_update:
+            previous_result = result.model_copy(deep=True)
+            merge_source_metadata(result, source_update, previous_result)
+            status = row.legal_status
+            if result.metadata_sources.get("legal_status") == "OFFICIAL":
+                status = source_update.legal_status
+            data = data.model_copy(update={"metadata": result.metadata, "legal_status": status})
+            row.source_metadata = source_update.model_dump(mode="json")
+        else:
+            if result.method == "HUMAN" and not result.metadata_sources:
+                result.metadata_sources = {
+                    field: "HUMAN"
+                    for field, value in result.metadata.model_dump().items()
+                    if has_metadata_value(field, value)
+                }
+                result.metadata_sources["legal_status"] = "HUMAN"
+            changed = {
+                field
+                for field in LegalMetadata.model_fields
+                if getattr(data.metadata, field) != getattr(result.metadata, field)
+            }
+            for field in changed:
+                result.metadata_sources[field] = "HUMAN"
+            if data.legal_status != row.legal_status:
+                result.metadata_sources["legal_status"] = "HUMAN"
+            result.anchors = [anchor for anchor in result.anchors if anchor.field not in changed]
+            result.method = "HUMAN"
+        result.metadata, result.nodes = data.metadata, data.nodes
         result.issues = validate_structure(result, row.mode)
         # 无效区间/层级不保存为可用结构，其他重大识别问题允许保留待修订。
-        if any(
+        if not source_update and any(
             issue.code
             in {
                 "duplicate_node_id",
@@ -321,18 +387,25 @@ class KnowledgeService:
             for issue in result.issues
         ):
             raise AppError("invalid_structure", "结构边界、标签或归属无效，请对照原文调整")
-        if data.source_kind == "OFFICIAL_VERIFIED" and (
-            not data.verification_note.strip() or not data.source_url.strip()
+        if (
+            not source_update
+            and data.source_kind == "OFFICIAL_VERIFIED"
+            and (not data.verification_note.strip() or not data.source_url.strip())
         ):
             raise AppError("verification_required", "官方核验需填写官方来源地址及核验说明")
-        if data.legal_status == "EFFECTIVE" and (
-            not data.version_confirmed
-            or not data.metadata.version_label.strip()
-            or not data.metadata.title.strip()
-            or not data.metadata.authority.strip()
-            or not data.metadata.promulgated_on
-            or not data.metadata.effective_on
-            or data.metadata.effective_on > datetime.now(UTC).date()
+        if (
+            not source_update
+            and data.legal_status == "EFFECTIVE"
+            and (data.legal_status != row.legal_status or data.version_confirmed)
+            and (
+                not data.version_confirmed
+                or not data.metadata.version_label.strip()
+                or not data.metadata.title.strip()
+                or not data.metadata.authority.strip()
+                or not data.metadata.promulgated_on
+                or not data.metadata.effective_on
+                or data.metadata.effective_on > datetime.now(UTC).date()
+            )
         ):
             raise AppError(
                 "incomplete_version",
@@ -348,7 +421,10 @@ class KnowledgeService:
         valid_warnings = {issue.id for issue in result.issues if issue.severity == "WARNING"}
         acknowledgements = sorted(valid_warnings.intersection(data.acknowledged_issues))
         row.status = ready_status(result, acknowledgements)
-        row.status_message, row.processing_stage = "人工修订已保存，等待审核发布", "COMPLETED"
+        row.status_message = (
+            "官网信息已同步，等待审核发布" if source_update else "人工修订已保存，等待审核发布"
+        )
+        row.processing_stage = "COMPLETED"
         await self.repo.save(
             ParseRevision(
                 document_id=row.id,
@@ -379,7 +455,10 @@ class KnowledgeService:
         row.embedded_count = await self.repo.reuse_embeddings(
             row.id, data.expected_revision, row.revision
         )
-        if row.embedding_model_id and segments:
+        previous_embedding_status = row.embedding_status
+        if source_update and previous_embedding_status == "FAILED":
+            row.embedding_status = "FAILED"
+        elif row.embedding_model_id and segments:
             row.embedding_status = "COMPLETED" if row.embedded_count == len(segments) else "QUEUED"
         else:
             row.embedding_status = "DISABLED"
@@ -387,7 +466,7 @@ class KnowledgeService:
             row.embedding_message = ""
         await self.audit(
             base_id,
-            "CORRECT",
+            "SYNC_SOURCE_METADATA" if source_update else "CORRECT",
             reason,
             row,
             before=before,
@@ -397,6 +476,34 @@ class KnowledgeService:
         )
         await self.repo.session.flush()
         return await self.detail(base_id, row.id)
+
+    async def sync_source_metadata(
+        self, base_id: UUID, document_id: UUID, expected_revision: int, source: SourceMetadata
+    ) -> DocumentDetail:
+        row = await self.document(base_id, document_id, lock=True)
+        self.require_revision(row, expected_revision)
+        if row.status in {"PUBLISHED", "FAILED"}:
+            raise AppError(
+                "metadata_sync_unavailable", "请先撤回发布或完成解析，再同步官网信息", 409
+            )
+        snapshot = await self.repo.snapshot(row.id, row.revision)
+        if snapshot is None:
+            raise AppError("parse_required", "请先完成文档解析")
+        result = ParseResult.model_validate(snapshot.result)
+        data = CorrectionInput(
+            expected_revision=expected_revision,
+            metadata=result.metadata,
+            nodes=result.nodes,
+            source_kind=row.source_kind,
+            source_url=row.source_url,
+            source_note=row.source_note,
+            verification_note=row.verification_note,
+            legal_status=row.legal_status,
+            version_confirmed=row.version_confirmed,
+            acknowledged_issues=snapshot.acknowledged_issues,
+            reason="同步官网元数据，保留人工修订与版本确认状态",
+        )
+        return await self.correct(base_id, document_id, data, source_update=source)
 
     async def publish(self, base_id: UUID, document_id: UUID, data: ReviewInput) -> DocumentView:
         row = await self.document(base_id, document_id, lock=True)

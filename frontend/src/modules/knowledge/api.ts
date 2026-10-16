@@ -14,6 +14,24 @@ import type {
 const root = '/knowledge-bases'
 const doc = (base: string, id: string): string => `${root}/${base}/documents/${id}`
 export const knowledgeApi = {
+  async syncSourceMetadata(
+    base: string,
+    id: string,
+    lawId: string,
+    revision: number,
+  ): Promise<DocumentDetail> {
+    return (
+      await apiClient.post<DocumentDetail>(
+        `/public-laws/${encodeURIComponent(lawId)}/metadata`,
+        {
+          knowledge_base_id: base,
+          document_id: id,
+          expected_revision: revision,
+        },
+        { timeout: 60_000 },
+      )
+    ).data
+  },
   async bases(q = '', page = 1, pageSize = 12): Promise<Page<KnowledgeBase>> {
     return (
       await apiClient.get<Page<KnowledgeBase>>(root, { params: { q, page, page_size: pageSize } })

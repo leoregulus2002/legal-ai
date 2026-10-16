@@ -21,6 +21,12 @@ export const router = createRouter({
           meta: { title: 'AI 法律对话' },
         },
         {
+          path: 'public-laws',
+          name: 'public-laws',
+          component: () => import('../modules/public-laws/pages/PublicLawLibraryPage.vue'),
+          meta: { title: '公开法律库' },
+        },
+        {
           path: 'regulations',
           name: 'regulations',
           component: () => import('../modules/regulations/pages/RegulationSearchPage.vue'),

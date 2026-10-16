@@ -33,6 +33,15 @@ class KnowledgeBase(Base):
 
 class KnowledgeDocument(Base):
     __tablename__ = "knowledge_documents"
+    __table_args__ = (
+        Index(
+            "uq_knowledge_documents_public_law",
+            "public_law_id",
+            "knowledge_base_id",
+            unique=True,
+            postgresql_where=text("public_law_id IS NOT NULL AND deleted_at IS NULL"),
+        ),
+    )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
     knowledge_base_id: Mapped[UUID] = mapped_column(ForeignKey("knowledge_bases.id"), index=True)
@@ -44,6 +53,8 @@ class KnowledgeDocument(Base):
     status: Mapped[str] = mapped_column(String(30), default="QUEUED", index=True)
     source_kind: Mapped[str] = mapped_column(String(30), default="USER_UPLOADED")
     source_url: Mapped[str] = mapped_column(String(2000), default="")
+    public_law_id: Mapped[str | None] = mapped_column(String(100))
+    source_metadata: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
     source_note: Mapped[str] = mapped_column(Text, default="")
     verification_note: Mapped[str] = mapped_column(Text, default="")
     legal_status: Mapped[str] = mapped_column(String(30), default="UNKNOWN")

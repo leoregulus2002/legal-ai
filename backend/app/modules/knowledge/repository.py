@@ -64,7 +64,9 @@ class KnowledgeRepository:
         statement = select(KnowledgeDocument).where(
             KnowledgeDocument.id == document_id, KnowledgeDocument.deleted_at.is_(None)
         )
-        return await self.session.scalar(statement.with_for_update() if lock else statement)
+        if lock:
+            statement = statement.with_for_update().execution_options(populate_existing=True)
+        return await self.session.scalar(statement)
 
     async def documents(
         self, base_id: UUID, query: str, status: str | None, page: int, page_size: int

@@ -2,6 +2,7 @@ import re
 from datetime import date
 
 from app.modules.knowledge.extraction import Extracted
+from app.modules.knowledge.metadata import CATEGORY_VALUES
 from app.modules.knowledge.schemas import (
     Anchor,
     LegalMetadata,
@@ -99,6 +100,18 @@ def metadata(text: str) -> tuple[LegalMetadata, list[Anchor]]:
         )
     if number:
         set_value("document_number", number)
+    version = re.search(r"(?:版本说明|版本信息|修订说明)\s*[:：]\s*([^\n]{1,200})", front)
+    if version:
+        set_value("version_label", version)
+    region = re.search(r"(?:适用地区|适用地域|行政区域)\s*[:：]\s*([^\n]{1,100})", front)
+    if region:
+        set_value("region", region)
+    category = re.search(r"(?:法规类别|法律法规分类|效力级别)\s*[:：]\s*([^\n]{1,50})", front)
+    if category and category[1].strip() in CATEGORY_VALUES:
+        data.category = CATEGORY_VALUES[category[1].strip()]
+        anchors.append(
+            Anchor(field="category", start=category.start(1), end=category.end(1), text=category[1])
+        )
     date_pattern = r"(\d{4})\s*[年./-]\s*(\d{1,2})\s*[月./-]\s*(\d{1,2})\s*日?"
     for field, labels in (
         ("promulgated_on", "公布日期|发布日期|颁布日期"),
@@ -125,6 +138,7 @@ def parse(extracted: Extracted, mode: str) -> ParseResult:
         result.issues = validate_structure(result, mode)
         return result
     result.metadata, result.anchors = metadata(text)
+    result.metadata_sources = {anchor.field: "TEXT" for anchor in result.anchors}
     markers: list[tuple[int, int, str, str, int | None, int]] = []
     article_starts: set[int] = set()
     for match in HEADING.finditer(text):

@@ -1,0 +1,103 @@
+from typing import Annotated, Literal
+
+from fastapi import APIRouter, Depends, Path, Query, Request, Response
+
+from app.core.database import SessionDependency
+from app.modules.knowledge.repository import KnowledgeRepository
+from app.modules.knowledge.schemas import DocumentDetail
+from app.modules.knowledge.service import KnowledgeService
+from app.modules.public_laws import service
+from app.modules.public_laws.library_service import PublicLawLibraryService
+from app.modules.public_laws.repository import PublicLawRepository
+from app.modules.public_laws.schemas import (
+    DownloadLink,
+    DownloadRequest,
+    PreviewLink,
+    PublicLawDetail,
+    PublicLawImportInput,
+    PublicLawImportResult,
+    PublicLawImportState,
+    PublicLawMetadataInput,
+    PublicLawOptions,
+    PublicLawPage,
+    PublicLawSearch,
+)
+
+router = APIRouter(prefix="/public-laws", tags=["public-laws"])
+LawId = Annotated[str, Path(pattern=r"^[A-Za-z0-9_-]{1,100}$")]
+FileFormat = Annotated[Literal["docx", "pdf"], Query(alias="format")]
+
+
+def get_library(request: Request, session: SessionDependency) -> PublicLawLibraryService:
+    return PublicLawLibraryService(
+        PublicLawRepository(session),
+        KnowledgeService(KnowledgeRepository(session), request.app.state.settings),
+    )
+
+
+Library = Annotated[PublicLawLibraryService, Depends(get_library)]
+
+
+@router.get("/options", response_model=PublicLawOptions)
+async def get_options() -> PublicLawOptions:
+    return await service.options()
+
+
+@router.post("/search", response_model=PublicLawPage)
+async def search(query: PublicLawSearch, library: Library) -> PublicLawPage:
+    return await library.search(query)
+
+
+@router.post("/import-status", response_model=list[PublicLawImportState])
+async def import_status(query: DownloadRequest, library: Library) -> list[PublicLawImportState]:
+    return await library.states(query.ids)
+
+
+@router.post("/{identifier}/import", response_model=PublicLawImportResult, status_code=202)
+async def import_law(
+    identifier: LawId, data: PublicLawImportInput, library: Library
+) -> PublicLawImportResult:
+    return await library.import_law(identifier, data)
+
+
+@router.post("/{identifier}/metadata", response_model=DocumentDetail)
+async def sync_metadata(
+    identifier: LawId, data: PublicLawMetadataInput, library: Library
+) -> DocumentDetail:
+    return await library.sync_metadata(identifier, data)
+
+
+@router.post("/downloads", response_model=list[DownloadLink])
+async def downloads(query: DownloadRequest) -> list[DownloadLink]:
+    return await service.downloads(query)
+
+
+@router.get("/{identifier}", response_model=PublicLawDetail)
+async def detail(identifier: LawId, decision: bool = False) -> PublicLawDetail:
+    return await service.detail(identifier, decision=decision)
+
+
+@router.get("/{identifier}/preview", response_model=PreviewLink)
+async def preview(
+    identifier: LawId, file_format: FileFormat = "docx", decision: bool = False
+) -> PreviewLink:
+    return await service.preview(identifier, file_format, decision=decision)
+
+
+@router.get("/{identifier}/download")
+async def download(identifier: LawId, file_format: FileFormat = "docx") -> Response:
+    content = await service.download_file(identifier, file_format)
+    media_type = (
+        "application/pdf"
+        if file_format == "pdf"
+        else "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    )
+    return Response(
+        content,
+        media_type=media_type,
+        headers={
+            "Content-Disposition": f'attachment; filename="{identifier}.{file_format}"',
+            "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )

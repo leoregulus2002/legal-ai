@@ -26,7 +26,7 @@ defineProps<{ feature: WorkspaceFeature; featured: boolean; order: number }>()
     <div class="feature-footer">
       <span class="feature-availability"
         ><AppIcon :name="feature.to ? 'arrow-right' : 'lock'" :size="13" /><span>{{
-          feature.to ? '开始咨询' : '即将开放'
+          feature.to ? (feature.id === 'chat' ? '开始咨询' : '进入模块') : '即将开放'
         }}</span></span
       ><AppIcon v-if="featured" class="feature-direction" name="arrow-right" :size="21" />
     </div>

@@ -62,6 +62,13 @@ class LegalMetadata(BaseModel):
     region: str = Field(default="", max_length=100)
 
 
+class SourceMetadata(BaseModel):
+    metadata: LegalMetadata
+    legal_status: LegalStatus = "UNKNOWN"
+    source_url: str = Field(max_length=2000)
+    fetched_at: datetime
+
+
 class Anchor(BaseModel):
     field: str
     start: int
@@ -104,6 +111,7 @@ class ParseResult(BaseModel):
     spans: list[SourceSpan] = Field(default_factory=list)
     nodes: list[StructureNode] = Field(default_factory=list, max_length=20000)
     metadata: LegalMetadata = Field(default_factory=LegalMetadata)
+    metadata_sources: dict[str, Literal["TEXT", "OFFICIAL", "HUMAN"]] = Field(default_factory=dict)
     anchors: list[Anchor] = Field(default_factory=list)
     extraction_issues: list[ParseIssue] = Field(default_factory=list)
     issues: list[ParseIssue] = Field(default_factory=list)
@@ -121,6 +129,8 @@ class DocumentView(BaseModel):
     status: DocumentStatus
     source_kind: SourceKind
     source_url: str
+    public_law_id: str | None
+    source_metadata: SourceMetadata | None = None
     source_note: str
     verification_note: str
     legal_status: LegalStatus

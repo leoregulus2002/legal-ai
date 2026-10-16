@@ -55,7 +55,7 @@ onMounted(() => {
         <span aria-hidden="true" />
       </div>
       <p class="section-description">从咨询到文书，为专业工作预留清晰入口。</p>
-      <div class="feature-grid">
+      <div class="feature-grid" :style="{ '--feature-row-count': workspaceFeatures.length - 1 }">
         <FeatureEntry
           v-for="(feature, index) in workspaceFeatures"
           :key="feature.id"
