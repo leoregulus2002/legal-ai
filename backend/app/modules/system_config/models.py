@@ -1,7 +1,16 @@
 from datetime import datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import JSON, DateTime, ForeignKey, String, Text, UniqueConstraint, func
+from sqlalchemy import (
+    JSON,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
@@ -60,3 +69,14 @@ class ConsultationConfig(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     settings: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
     kb_key_encrypted: Mapped[str | None] = mapped_column(Text)
+
+
+class VectorizationConfig(Base):
+    __tablename__ = "vectorization_config"
+    __table_args__ = (
+        CheckConstraint("id = 1", name="singleton"),
+        CheckConstraint("concurrency BETWEEN 1 AND 10", name="concurrency_range"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    concurrency: Mapped[int] = mapped_column(default=1, server_default="1")

@@ -109,18 +109,35 @@ class PublicLawRepository:
                 .on_conflict_do_nothing(index_elements=["task_id", "law_id"])
             )
 
-    async def next_item(self, task_id: UUID) -> PublicLawVectorItem | None:
-        return await self.session.scalar(
-            select(PublicLawVectorItem)
-            .where(
-                PublicLawVectorItem.task_id == task_id,
-                PublicLawVectorItem.status.in_(["PROCESSING", "PENDING"]),
+    async def next_items(
+        self, task_id: UUID, *, limit: int, exclude: Sequence[UUID] = ()
+    ) -> list[PublicLawVectorItem]:
+        return list(
+            await self.session.scalars(
+                select(PublicLawVectorItem)
+                .where(
+                    PublicLawVectorItem.task_id == task_id,
+                    PublicLawVectorItem.status.in_(["PROCESSING", "PENDING"]),
+                    PublicLawVectorItem.id.not_in(exclude),
+                )
+                .order_by(
+                    (PublicLawVectorItem.status == "PROCESSING").desc(),
+                    PublicLawVectorItem.sequence,
+                )
+                .limit(limit)
             )
-            .order_by(
-                (PublicLawVectorItem.status == "PROCESSING").desc(),
-                PublicLawVectorItem.sequence,
+        )
+
+    async def processing_items(self, task_id: UUID) -> list[PublicLawVectorItem]:
+        return list(
+            await self.session.scalars(
+                select(PublicLawVectorItem)
+                .where(
+                    PublicLawVectorItem.task_id == task_id,
+                    PublicLawVectorItem.status == "PROCESSING",
+                )
+                .order_by(PublicLawVectorItem.sequence)
             )
-            .limit(1)
         )
 
     async def item(self, item_id: UUID) -> PublicLawVectorItem | None:
@@ -152,14 +169,19 @@ class PublicLawRepository:
                 )
             ).all()
         )
-        current = await self.session.scalar(
-            select(PublicLawVectorItem)
-            .where(
-                PublicLawVectorItem.task_id == task.id,
-                PublicLawVectorItem.status == "PROCESSING",
+        current_rows = (
+            await self.session.execute(
+                select(PublicLawVectorItem, KnowledgeDocument)
+                .outerjoin(
+                    KnowledgeDocument, KnowledgeDocument.id == PublicLawVectorItem.document_id
+                )
+                .where(
+                    PublicLawVectorItem.task_id == task.id,
+                    PublicLawVectorItem.status == "PROCESSING",
+                )
+                .order_by(PublicLawVectorItem.sequence)
             )
-            .limit(1)
-        )
+        ).all()
         recent = await self.session.scalars(
             select(PublicLawVectorItem)
             .where(
@@ -169,30 +191,36 @@ class PublicLawRepository:
             .order_by(PublicLawVectorItem.updated_at.desc(), PublicLawVectorItem.sequence.desc())
             .limit(50)
         )
-        document = (
-            await self.session.get(KnowledgeDocument, current.document_id)
-            if current and current.document_id
-            else None
-        )
 
         def item_view(item: PublicLawVectorItem) -> VectorTaskItemView:
             return VectorTaskItemView.model_validate(item, from_attributes=True)
 
+        current_items = [
+            item_view(item).model_copy(
+                update={
+                    "stage": document.processing_stage if document else "IMPORTING",
+                    "embedded_count": document.embedded_count if document else 0,
+                    "chunk_count": document.chunk_count if document else 0,
+                }
+            )
+            for item, document in current_rows
+        ]
+        current = current_items[0] if current_items else None
         return VectorTaskView(
             id=task.id,
             status=task.status,
             knowledge_base_id=task.knowledge_base_id,
+            concurrency=task.concurrency,
             total=sum(counts.values()) if task.status == "COMPLETED" else task.total,
             discovered=sum(counts.values()),
             completed=counts.get("COMPLETED", 0),
             skipped=counts.get("SKIPPED", 0),
             failed=counts.get("FAILED", 0),
-            current=item_view(current) if current else None,
-            stage=document.processing_stage
-            if document
-            else ("IMPORTING" if current else "SCANNING"),
-            embedded_count=document.embedded_count if document else 0,
-            chunk_count=document.chunk_count if document else 0,
+            current=current,
+            current_items=current_items,
+            stage=current.stage if current else "SCANNING",
+            embedded_count=current.embedded_count if current else 0,
+            chunk_count=current.chunk_count if current else 0,
             recent=[item_view(item) for item in recent],
             created_at=task.created_at,
             finished_at=task.finished_at,

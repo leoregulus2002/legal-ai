@@ -12,6 +12,7 @@ from app.modules.system_config.schemas import (
     PolicyView,
     PromptInput,
     PromptView,
+    VectorizationSettings,
 )
 from app.modules.system_config.service import ConfigService
 
@@ -74,3 +75,15 @@ async def get_policy(service: Service) -> PolicyView:
 @router.put("/consultation", response_model=PolicyView)
 async def update_policy(data: PolicyInput, service: Service) -> PolicyView:
     return await service.save_policy(data)
+
+
+@router.get("/vectorization", response_model=VectorizationSettings)
+async def get_vectorization(service: Service) -> VectorizationSettings:
+    return await service.vectorization()
+
+
+@router.put("/vectorization", response_model=VectorizationSettings)
+async def update_vectorization(
+    data: VectorizationSettings, service: Service
+) -> VectorizationSettings:
+    return await service.save_vectorization(data)

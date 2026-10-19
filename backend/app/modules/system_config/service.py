@@ -14,6 +14,7 @@ from app.modules.system_config.schemas import (
     PolicyView,
     PromptInput,
     PromptView,
+    VectorizationSettings,
 )
 
 
@@ -87,6 +88,15 @@ class ConfigService:
     async def policy(self) -> PolicyView:
         row = await self.repo.policy()
         return PolicyView.model_validate(row.settings)
+
+    async def vectorization(self) -> VectorizationSettings:
+        return VectorizationSettings.model_validate(await self.repo.vectorization())
+
+    async def save_vectorization(self, data: VectorizationSettings) -> VectorizationSettings:
+        row = await self.repo.vectorization(lock=True)
+        row.concurrency = data.concurrency
+        await self.repo.session.flush()
+        return VectorizationSettings.model_validate(row)
 
     async def save_policy(self, data: PolicyInput) -> PolicyView:
         row = await self.repo.policy(lock=True)

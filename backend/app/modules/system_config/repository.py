@@ -8,6 +8,7 @@ from app.modules.system_config.models import (
     ModelConfig,
     PromptVersion,
     SystemPrompt,
+    VectorizationConfig,
 )
 
 
@@ -47,6 +48,12 @@ class ConfigRepository:
         row = await self.session.get(ConsultationConfig, 1, with_for_update=lock)
         if row is None:
             raise RuntimeError("consultation_config migration is required")
+        return row
+
+    async def vectorization(self, *, lock: bool = False) -> VectorizationConfig:
+        row = await self.session.get(VectorizationConfig, 1, with_for_update=lock)
+        if row is None:
+            raise RuntimeError("vectorization_config migration is required")
         return row
 
     async def save(self, row: ModelConfig | SystemPrompt | PromptVersion) -> None:

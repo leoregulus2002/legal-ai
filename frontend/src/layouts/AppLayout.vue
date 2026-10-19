@@ -92,6 +92,13 @@ watch(
           ><AppIcon name="settings" :size="20" /><span>模型配置</span></RouterLink
         >
         <RouterLink
+          to="/settings/vectorization"
+          class="nav-item"
+          :class="{ 'is-active': route.name === 'vectorization-config' }"
+          :aria-current="route.name === 'vectorization-config' ? 'page' : undefined"
+          ><AppIcon name="refresh" :size="20" /><span>自动向量化</span></RouterLink
+        >
+        <RouterLink
           to="/settings/consultation"
           class="nav-item"
           :class="{ 'is-active': route.name === 'consultation-config' }"

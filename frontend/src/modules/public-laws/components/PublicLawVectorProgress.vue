@@ -45,7 +45,7 @@ const active = computed(() => ['RUNNING', 'STOPPING'].includes(props.task.status
     <div class="public-law-vector-heading">
       <div>
         <h2 id="vector-progress-title">{{ labels[task.status] }}</h2>
-        <p>逐条处理 · 已有向量自动跳过 · 已完成结果持续保留</p>
+        <p>并发上限 {{ task.concurrency }} · 已有向量自动跳过 · 已完成结果持续保留</p>
       </div>
       <div class="public-law-import-actions">
         <NButton size="small" @click="$emit('refresh')">刷新进度</NButton>
@@ -72,14 +72,20 @@ const active = computed(() => ['RUNNING', 'STOPPING'].includes(props.task.status
       <span>完成 {{ task.completed }}</span
       ><span>跳过 {{ task.skipped }}</span>
       <span>待重试 {{ task.failed }}</span>
+      <span v-if="active">处理中 {{ task.current_items.length }} / {{ task.concurrency }} 条</span>
     </div>
-    <p v-if="active" class="public-law-vector-current" aria-live="polite">
-      <strong>{{ task.current?.title ?? '正在查找法规' }}</strong>
-      <span>{{ stages[task.stage ?? 'SCANNING'] ?? '处理中' }}</span>
-      <span v-if="task.chunk_count > 0"
-        >片段 {{ task.embedded_count }} / {{ task.chunk_count }}</span
-      >
-    </p>
+    <div v-if="active" aria-live="polite">
+      <p v-if="!task.current_items.length" class="public-law-vector-current">
+        {{ task.status === 'STOPPING' ? '正在停止任务' : '正在查找法规' }}
+      </p>
+      <p v-for="item in task.current_items" :key="item.id" class="public-law-vector-current">
+        <strong>{{ item.title }}</strong>
+        <span>{{ stages[item.stage ?? 'IMPORTING'] ?? '处理中' }}</span>
+        <span v-if="item.chunk_count > 0"
+          >片段 {{ item.embedded_count }} / {{ item.chunk_count }}</span
+        >
+      </p>
+    </div>
     <details v-if="task.recent.length">
       <summary>处理记录（最近 {{ task.recent.length }} 条）</summary>
       <ul class="public-law-import-items">

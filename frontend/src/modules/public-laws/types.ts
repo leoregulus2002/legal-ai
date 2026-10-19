@@ -54,18 +54,23 @@ export interface VectorTaskItem {
   status: 'PENDING' | 'PROCESSING' | 'COMPLETED' | 'SKIPPED' | 'FAILED' | 'STOPPED'
   document_id: string | null
   error_message: string | null
+  stage: string | null
+  embedded_count: number
+  chunk_count: number
 }
 
 export interface VectorTask {
   id: string
   status: 'RUNNING' | 'STOPPING' | 'STOPPED' | 'COMPLETED' | 'FAILED'
   knowledge_base_id: string
+  concurrency: number
   total: number | null
   discovered: number
   completed: number
   skipped: number
   failed: number
   current: VectorTaskItem | null
+  current_items: VectorTaskItem[]
   stage: string | null
   embedded_count: number
   chunk_count: number

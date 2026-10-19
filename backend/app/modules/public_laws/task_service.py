@@ -6,6 +6,8 @@ from app.modules.knowledge.service import KnowledgeService
 from app.modules.public_laws.models import PublicLawVectorTask
 from app.modules.public_laws.repository import PublicLawRepository
 from app.modules.public_laws.schemas import VectorTaskInput, VectorTaskView
+from app.modules.system_config.repository import ConfigRepository
+from app.modules.system_config.service import ConfigService
 
 
 class PublicLawTaskService:
@@ -24,6 +26,9 @@ class PublicLawTaskService:
             raise AppError("public_laws_processing", "已有公开法规正在处理，请完成后再开始", 409)
         await self.knowledge.base(data.knowledge_base_id)
         provider = await self.knowledge.embedding_provider(data.embedding_model_id)
+        configuration = await ConfigService(
+            ConfigRepository(self.repo.session), self.knowledge.settings
+        ).vectorization()
         query = (
             data.query.model_copy(
                 update={
@@ -39,6 +44,7 @@ class PublicLawTaskService:
         task = PublicLawVectorTask(
             knowledge_base_id=data.knowledge_base_id,
             embedding_model_id=data.embedding_model_id,
+            concurrency=configuration.concurrency,
             embedding_fingerprint=provider.fingerprint,
             query=query.model_dump(mode="json") if query else None,
             total=None if query else len({law.id for law in data.laws}),

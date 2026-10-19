@@ -69,6 +69,12 @@ export const router = createRouter({
           meta: { title: '系统提示词' },
         },
         {
+          path: 'settings/vectorization',
+          name: 'vectorization-config',
+          component: () => import('../modules/system-config/pages/VectorizationConfigPage.vue'),
+          meta: { title: '自动向量化' },
+        },
+        {
           path: 'settings/consultation',
           name: 'consultation-config',
           component: () => import('../modules/system-config/pages/ConsultationConfigPage.vue'),

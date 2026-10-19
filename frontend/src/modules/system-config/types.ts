@@ -60,6 +60,10 @@ export interface Policy {
 export type PolicyInput = Policy
 export type PolicyView = Policy
 
+export interface VectorizationSettings {
+  concurrency: number
+}
+
 export const defaultPolicy = (): Policy => ({
   allowed_model_ids: [],
   default_model_id: null,

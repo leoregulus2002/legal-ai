@@ -13,6 +13,7 @@ const message = useMessage()
 const showError = useErrorMessage()
 const baseId = ref<string | null>(null)
 const modelId = ref<string | null>(null)
+const concurrency = ref(1)
 const bases = ref<{ label: string; value: string }[]>([])
 const models = ref<{ label: string; value: string }[]>([])
 const loading = ref(false)
@@ -49,12 +50,14 @@ async function loadOptions(): Promise<void> {
   const request = ++optionsSequence
   loading.value = true
   try {
-    const [basePage, configurations] = await Promise.all([
+    const [basePage, configurations, vectorization] = await Promise.all([
       knowledgeApi.bases('', 1, 100),
       configApi.models(),
+      configApi.vectorization(),
     ])
     if (!alive || request !== optionsSequence) return
     bases.value = basePage.items.map((base) => ({ label: base.name, value: base.id }))
+    concurrency.value = vectorization.concurrency
     models.value = configurations
       .filter((model) => model.enabled && model.model_type === 'embedding')
       .map((model) => ({ label: model.name, value: model.id }))
@@ -84,7 +87,7 @@ async function submit(): Promise<void> {
       props.query ? { query: props.query } : { laws: props.laws },
     )
     if (!alive) return
-    message.success('向量化任务已开始，法规将逐条处理')
+    message.success(`向量化任务已开始，最多同时处理 ${task.concurrency} 条法规`)
     emit('started', task)
     emit('close')
   } catch (error: unknown) {
@@ -141,7 +144,7 @@ onUnmounted(() => {
         {{
           query ? '处理当前检索条件下的全部法规，不限当前页。' : `处理所选 ${laws.length} 条法规。`
         }}
-        每次只处理一条，已向量化法规自动跳过。支持随时停止，关闭页面后任务继续运行。
+        并发数采用系统统一配置，已向量化法规自动跳过。支持随时停止，关闭页面后任务继续运行。
       </p>
       <div class="public-law-import-fields">
         <label
@@ -167,6 +170,10 @@ onUnmounted(() => {
             aria-label="向量模型"
         /></label>
       </div>
+      <p class="public-law-import-note">
+        <template v-if="optionsLoaded">当前配置：最多同时处理 {{ concurrency }} 条法规。</template>
+        <RouterLink to="/settings/vectorization" @click="emit('close')">调整并发配置</RouterLink>
+      </p>
       <p class="public-law-import-note">
         <RouterLink to="/knowledge" @click="emit('close')">前往管理或新建知识库</RouterLink>
       </p>

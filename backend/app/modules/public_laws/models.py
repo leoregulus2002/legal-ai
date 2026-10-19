@@ -21,6 +21,7 @@ class PublicLawVectorTask(Base):
     __tablename__ = "public_law_vector_tasks"
     __table_args__ = (
         CheckConstraint("slot = 1", name="singleton_slot"),
+        CheckConstraint("concurrency BETWEEN 1 AND 10", name="concurrency_range"),
         Index(
             "uq_public_law_vector_tasks_active",
             "slot",
@@ -31,6 +32,7 @@ class PublicLawVectorTask(Base):
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
     slot: Mapped[int] = mapped_column(default=1, server_default="1")
+    concurrency: Mapped[int] = mapped_column(default=1, server_default="1")
     status: Mapped[str] = mapped_column(String(20), default="RUNNING")
     knowledge_base_id: Mapped[UUID] = mapped_column(ForeignKey("knowledge_bases.id"))
     embedding_model_id: Mapped[UUID] = mapped_column(ForeignKey("ai_models.id"))

@@ -139,3 +139,8 @@ class Policy(BaseModel):
 
 PolicyInput = Policy
 PolicyView = Policy
+
+
+class VectorizationSettings(BaseModel):
+    model_config = ConfigDict(from_attributes=True, extra="forbid")
+    concurrency: int = Field(default=1, ge=1, le=10, strict=True)

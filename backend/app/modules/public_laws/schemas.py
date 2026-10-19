@@ -160,18 +160,23 @@ class VectorTaskItemView(BaseModel):
     status: str
     document_id: UUID | None
     error_message: str | None
+    stage: str | None = None
+    embedded_count: int = 0
+    chunk_count: int = 0
 
 
 class VectorTaskView(BaseModel):
     id: UUID
     status: Literal["RUNNING", "STOPPING", "STOPPED", "COMPLETED", "FAILED"]
     knowledge_base_id: UUID
+    concurrency: int
     total: int | None
     discovered: int
     completed: int
     skipped: int
     failed: int
     current: VectorTaskItemView | None
+    current_items: list[VectorTaskItemView]
     stage: str | None
     embedded_count: int
     chunk_count: int

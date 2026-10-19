@@ -7,9 +7,16 @@ import type {
   PromptInput,
   PromptVersion,
   SystemPrompt,
+  VectorizationSettings,
 } from './types'
 
 export const configApi = {
+  async vectorization(): Promise<VectorizationSettings> {
+    return (await apiClient.get<VectorizationSettings>('/system-config/vectorization')).data
+  },
+  async saveVectorization(data: VectorizationSettings): Promise<VectorizationSettings> {
+    return (await apiClient.put<VectorizationSettings>('/system-config/vectorization', data)).data
+  },
   async models(): Promise<ModelConfig[]> {
     return (await apiClient.get<ModelConfig[]>('/system-config/models')).data
   },
