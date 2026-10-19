@@ -1,7 +1,9 @@
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
+import { storeToRefs } from 'pinia'
 import { useMessage } from 'naive-ui'
 import { useErrorMessage } from '../../composables/useErrorMessage'
 import { publicLawApi } from './api'
+import { usePublicLawOptionsStore } from './store'
 import { applyImportStates, defaultQuery, filterLabel, statusOptions } from './types'
 import type { PublicLawPage, PublicLawQuery, SortField } from './types'
 
@@ -20,10 +22,10 @@ export function usePublicLawSearch() {
   const showError = useErrorMessage()
   const form = reactive(defaultQuery())
   const applied = ref(defaultQuery())
-  const options = ref<Awaited<ReturnType<typeof publicLawApi.options>>>()
+  const optionsStore = usePublicLawOptionsStore()
+  const { options, optionsLoading } = storeToRefs(optionsStore)
   const result = ref<PublicLawPage>()
   const loading = ref(false)
-  const optionsLoading = ref(false)
   const selected = ref<string[]>([])
   const dateRanges = reactive({
     publishedFrom: '',
@@ -101,12 +103,11 @@ export function usePublicLawSearch() {
       if (!alive || request !== sequence || stateRequest !== statusSequence) return
       statusFailures = 0
       applyImportStates(page.items, states)
-      if (
-        applied.value.vectorization === 'not_vectorized' &&
-        page.items.some((item) => item.vectorization_status === 'COMPLETED')
-      ) {
-        await fetchPage({ ...applied.value, cursor: null, pageNum: 1 }, true)
-        return
+      if (applied.value.vectorization === 'not_vectorized') {
+        // 仅更新当前页，不因向量化完成重新请求官方列表或自动补满页面。
+        page.items = page.items.filter((item) => item.vectorization_status !== 'COMPLETED')
+        const visibleIds = new Set(page.items.map((item) => item.id))
+        selected.value = selected.value.filter((id) => visibleIds.has(id))
       }
       scheduleStatusRefresh()
     } catch (error: unknown) {
@@ -183,14 +184,10 @@ export function usePublicLawSearch() {
   }
 
   async function loadOptions(): Promise<void> {
-    optionsLoading.value = true
     try {
-      const data = await publicLawApi.options()
-      if (alive) options.value = data
+      await optionsStore.loadOptions()
     } catch (error: unknown) {
       if (alive) showError(error)
-    } finally {
-      if (alive) optionsLoading.value = false
     }
   }
 

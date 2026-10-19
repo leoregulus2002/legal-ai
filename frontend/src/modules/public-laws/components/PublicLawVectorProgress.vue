@@ -1,10 +1,18 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { NButton, NProgress, NTag } from 'naive-ui'
+import { ApiError } from '../../../api/client'
+import { useErrorMessage } from '../../../composables/useErrorMessage'
 import type { VectorTask } from '../types'
 
 const props = defineProps<{ task: VectorTask; stopping: boolean }>()
 defineEmits<{ stop: []; refresh: [] }>()
+const showError = useErrorMessage()
+
+function showFailure(errorMessage: string | null): void {
+  if (errorMessage) showError(new ApiError(errorMessage, 'http'))
+}
+
 const labels: Record<VectorTask['status'], string> = {
   RUNNING: '向量化进行中',
   STOPPING: '正在停止',
@@ -94,6 +102,14 @@ const active = computed(() => ['RUNNING', 'STOPPING'].includes(props.task.status
           <NTag size="small" :type="item.status === 'COMPLETED' ? 'success' : 'default'">{{
             itemLabels[item.status]
           }}</NTag>
+          <NButton
+            v-if="item.error_message"
+            size="tiny"
+            text
+            @click="showFailure(item.error_message)"
+          >
+            查看原因
+          </NButton>
           <RouterLink
             v-if="item.document_id"
             :to="`/knowledge/${task.knowledge_base_id}/documents/${item.document_id}`"

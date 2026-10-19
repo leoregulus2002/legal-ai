@@ -25,13 +25,15 @@ export function usePublicLawVectorTask(onChanged: () => void) {
     sequence++
     clearTimeout(timer)
     const previous = task.value
-    if (previous?.id !== value.id) shownFailures.clear()
+    const firstSnapshot = previous?.id !== value.id
+    if (firstSnapshot) shownFailures.clear()
     task.value = value
     failures = 0
     for (const item of value.recent) {
       if (item.error_message && !shownFailures.has(item.id)) {
         shownFailures.add(item.id)
-        showError(new ApiError(item.error_message, 'http'))
+        // 首次载入只记录历史失败；之后轮询新增的失败才自动提示。
+        if (!firstSnapshot) showError(new ApiError(item.error_message, 'http'))
       }
     }
     if (previous?.id === value.id && previous.status !== value.status) {
