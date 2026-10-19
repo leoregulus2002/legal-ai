@@ -3,6 +3,7 @@ from typing import Literal
 from urllib.parse import parse_qs, urlsplit
 
 from app.common.exceptions import AppError
+from app.modules.knowledge.extraction import OLE_SIGNATURE
 from app.modules.knowledge.models import KnowledgeBase, KnowledgeDocument
 from app.modules.knowledge.schemas import DocumentActionInput, DocumentDetail, VectorizeInput
 from app.modules.knowledge.service import KnowledgeService
@@ -196,7 +197,8 @@ class PublicLawLibraryService:
             return PublicLawImportResult(state=import_state(row, base), action="RETRIED")
         if law is None or content is None:
             raise AppError("import_changed", "导入状态已变化，请重新操作", 409)
-        filename = re.sub(r"[\\/\x00-\x1f]", "_", law.title) + f".{file_format}"
+        suffix = ".doc" if content.startswith(OLE_SIGNATURE) else f".{file_format}"
+        filename = re.sub(r"[\\/\x00-\x1f]", "_", law.title) + suffix
         document = await self.knowledge.upload_content(
             base.id,
             filename,

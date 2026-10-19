@@ -90,7 +90,7 @@ class KnowledgeWorker:
             )
         async with asyncio.timeout(240):
             extracted = await anyio.to_thread.run_sync(
-                extract, filename, data, abandon_on_cancel=True
+                extract, filename, data, self.settings.word_extractor_path, abandon_on_cancel=True
             )
         if not await self.stage(base_id, document_id, token, "STRUCTURING"):
             return

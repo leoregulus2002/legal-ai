@@ -157,18 +157,45 @@ class PublicLawRepository:
             )
         )
 
-    async def task_view(self, task: PublicLawVectorTask) -> VectorTaskView:
-        counts = dict(
-            (
-                await self.session.execute(
-                    select(PublicLawVectorItem.status, func.count())
-                    .where(
-                        PublicLawVectorItem.task_id == task.id,
-                    )
-                    .group_by(PublicLawVectorItem.status)
-                )
-            ).all()
+    async def task_item_status_counts(self, task_id: UUID) -> list[tuple[str, int, int]]:
+        rows = await self.session.execute(
+            select(
+                PublicLawVectorItem.status,
+                func.count(),
+                func.count().filter(
+                    KnowledgeDocument.status == "PUBLISHED",
+                    KnowledgeDocument.embedding_status == "COMPLETED",
+                    KnowledgeDocument.chunk_count > 0,
+                    KnowledgeDocument.embedded_count >= KnowledgeDocument.chunk_count,
+                    KnowledgeDocument.deleted_at.is_(None),
+                    KnowledgeBase.deleted_at.is_(None),
+                ),
+            )
+            .select_from(PublicLawVectorItem)
+            .outerjoin(KnowledgeDocument, KnowledgeDocument.id == PublicLawVectorItem.document_id)
+            .outerjoin(KnowledgeBase, KnowledgeBase.id == KnowledgeDocument.knowledge_base_id)
+            .where(PublicLawVectorItem.task_id == task_id)
+            .group_by(PublicLawVectorItem.status)
         )
+        return [(status, total, published) for status, total, published in rows]
+
+    async def item_documents(self, document_ids: Sequence[UUID]) -> list[KnowledgeDocument]:
+        if not document_ids:
+            return []
+        return list(
+            await self.session.scalars(
+                select(KnowledgeDocument)
+                .join(KnowledgeBase, KnowledgeBase.id == KnowledgeDocument.knowledge_base_id)
+                .where(
+                    KnowledgeDocument.id.in_(document_ids),
+                    KnowledgeDocument.deleted_at.is_(None),
+                    KnowledgeBase.deleted_at.is_(None),
+                )
+                .execution_options(populate_existing=True)
+            )
+        )
+
+    async def task_view(self, task: PublicLawVectorTask, counts: dict[str, int]) -> VectorTaskView:
         current_rows = (
             await self.session.execute(
                 select(PublicLawVectorItem, KnowledgeDocument)

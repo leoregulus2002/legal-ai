@@ -1,5 +1,7 @@
 import io
 import re
+import subprocess
+import tempfile
 import zipfile
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
@@ -13,8 +15,10 @@ from app.modules.knowledge.schemas import ParseIssue, SourceSpan
 
 MAX_TEXT = 2_000_000
 MAX_XML = 64 * 1024 * 1024
+OLE_SIGNATURE = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
 MEDIA_TYPES = {
     ".pdf": "application/pdf",
+    ".doc": "application/msword",
     ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     ".txt": "text/plain",
     ".md": "text/markdown",
@@ -98,10 +102,76 @@ def decode(data: bytes) -> str:
     raise AppError("text_encoding", "无法识别文本编码，请使用 UTF-8、UTF-16 或 GB18030 保存")
 
 
-def extract(filename: str, data: bytes) -> Extracted:
+def assign_text(result: Extracted, text: str) -> None:
+    if len(text) > MAX_TEXT:
+        raise AppError("document_too_long", "文档提取内容过长，请拆分后导入")
+    result.text = text
+    offset = 0
+    for index, line in enumerate(text.splitlines(keepends=True), 1):
+        result.spans.append(
+            SourceSpan(kind="line", index=index, start=offset, end=offset + len(line))
+        )
+        offset += len(line)
+
+
+def extract_legacy_word(data: bytes, executable: str) -> str:
+    # 在后台提取线程中执行；独立临时目录，原件保持不变。
+    with tempfile.TemporaryDirectory(prefix="legal-ai-word-") as directory:
+        source = Path(directory) / "original.doc"
+        source.write_bytes(data)
+        with tempfile.TemporaryFile() as output:
+            try:
+                completed = subprocess.run(
+                    [executable, "-t", "-w", "0", "-m", "UTF-8.txt", str(source)],
+                    stdin=subprocess.DEVNULL,
+                    stdout=output,
+                    stderr=subprocess.DEVNULL,
+                    timeout=30,
+                    check=False,
+                )
+            except OSError as exc:
+                raise AppError(
+                    "word_extractor_unavailable", "旧版 Word 解析组件未就绪，请联系管理员"
+                ) from exc
+            except subprocess.TimeoutExpired as exc:
+                raise AppError(
+                    "legacy_word_timeout", "旧版 Word 提取超时，请转换为 DOCX 或 PDF 后重新导入"
+                ) from exc
+            if completed.returncode != 0:
+                raise AppError(
+                    "invalid_legacy_word",
+                    "旧版 Word 文件无法提取，请确认未加密且未损坏，或转换为 DOCX、PDF 后重新导入",
+                )
+            output.seek(0)
+            value = output.read(MAX_TEXT * 4 + 1)
+            if len(value) > MAX_TEXT * 4:
+                raise AppError("document_too_long", "文档提取内容过长，请拆分后导入")
+            try:
+                return value.decode("utf-8-sig").replace("\r\n", "\n").replace("\r", "\n")
+            except UnicodeError as exc:
+                raise AppError(
+                    "legacy_word_encoding", "旧版 Word 文字编码无法识别，请转换为 DOCX 后重新导入"
+                ) from exc
+
+
+def extract(filename: str, data: bytes, word_extractor_path: str = "antiword") -> Extracted:
     suffix = Path(filename).suffix.lower()
     result = Extracted()
-    if suffix == ".pdf":
+    if suffix in {".doc", ".docx"} and data.startswith(OLE_SIGNATURE):
+        assign_text(result, extract_legacy_word(data, word_extractor_path))
+        result.issues.append(
+            ParseIssue(
+                id="legacy_word_layout",
+                code="legacy_word_layout",
+                severity="WARNING",
+                message="原件为旧版 Word 格式，已提取正文，请对照原件核对表格及段落顺序",
+            )
+        )
+    elif suffix == ".doc":
+        raise AppError(
+            "invalid_legacy_word", "文件不是可识别的旧版 Word 文档，请核对格式后重新导入"
+        )
+    elif suffix == ".pdf":
         reader = PdfReader(io.BytesIO(data))
         if reader.is_encrypted:
             raise AppError("encrypted_pdf", "PDF 已加密，请解密后重新导入")
@@ -168,7 +238,11 @@ def extract(filename: str, data: bytes) -> Extracted:
         )
     elif suffix == ".docx":
         namespace = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
-        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+        try:
+            archive = zipfile.ZipFile(io.BytesIO(data))
+        except zipfile.BadZipFile as exc:
+            raise AppError("invalid_docx", "DOCX 文件内容或格式无效，请重新保存后导入") from exc
+        with archive:
             if sum(info.file_size for info in archive.infolist()) > MAX_XML:
                 raise AppError("docx_too_large", "DOCX 解压内容过大，请拆分后导入")
             names = archive.namelist()
@@ -236,15 +310,7 @@ def extract(filename: str, data: bytes) -> Extracted:
             parser.feed(text)
             parser.close()
             text = "".join(parser.parts)
-        if len(text) > MAX_TEXT:
-            raise AppError("document_too_long", "文档提取内容过长，请拆分后导入")
-        result.text = text
-        offset = 0
-        for index, line in enumerate(text.splitlines(keepends=True), 1):
-            result.spans.append(
-                SourceSpan(kind="line", index=index, start=offset, end=offset + len(line))
-            )
-            offset += len(line)
+        assign_text(result, text)
     if not result.text.strip():
         result.issues.append(
             ParseIssue(

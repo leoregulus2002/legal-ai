@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     cors_origins: list[str] = Field(default_factory=lambda: ["http://localhost:5173"])
     config_encryption_key: SecretStr | None = None
     attachment_directory: str = "./data/attachments"
+    word_extractor_path: str = "antiword"
 
     @field_validator("database_url")
     @classmethod

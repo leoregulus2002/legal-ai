@@ -246,7 +246,9 @@ class KnowledgeService:
         filename = Path(filename.replace("\\", "/")).name
         suffix = Path(filename).suffix.lower()
         if suffix not in MEDIA_TYPES:
-            raise AppError("unsupported_document", "支持 PDF、DOCX、TXT、Markdown 和 HTML 文件")
+            raise AppError(
+                "unsupported_document", "支持 PDF、DOC、DOCX、TXT、Markdown 和 HTML 文件"
+            )
         filename = filename[: 240 - len(suffix)] + suffix if len(filename) > 240 else filename
         if len(data) > 25 * 1024 * 1024:
             raise AppError("document_too_large", "单个文件不能超过 25 MB")

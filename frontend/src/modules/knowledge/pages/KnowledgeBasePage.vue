@@ -363,7 +363,7 @@ onUnmounted(() => {
       :closable="!uploading"
       ><div class="kb-form">
         <p class="kb-note">
-          无需固定模板。支持 PDF、DOCX、TXT、Markdown、HTML；单文件最多 25 MB。扫描 PDF 的 OCR
+          无需固定模板。支持 PDF、DOC、DOCX、TXT、Markdown、HTML；单文件最多 25 MB。扫描 PDF 的 OCR
           暂未开放。
         </p>
         <label
@@ -379,7 +379,7 @@ onUnmounted(() => {
             ref="fileInput"
             type="file"
             multiple
-            accept=".pdf,.docx,.txt,.md,.markdown,.html,.htm"
+            accept=".pdf,.doc,.docx,.txt,.md,.markdown,.html,.htm"
             :disabled="uploading"
             @change="chooseFiles"
         /></label>
