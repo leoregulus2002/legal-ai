@@ -54,7 +54,7 @@ export const router = createRouter({
           path: 'knowledge/:baseId/documents/:documentId',
           name: 'knowledge-document',
           component: () => import('../modules/knowledge/pages/DocumentPage.vue'),
-          meta: { title: '文档解析与审核' },
+          meta: { title: '文档处理与发布' },
         },
         {
           path: 'settings/models',

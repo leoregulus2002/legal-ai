@@ -1,8 +1,7 @@
 export type ImportMode = 'GENERAL' | 'LEGAL'
 export type SourceKind = 'OFFICIAL_VERIFIED' | 'USER_UPLOADED' | 'THIRD_PARTY' | 'PENDING_REVIEW'
 export type LegalStatus = 'UNKNOWN' | 'NOT_YET_EFFECTIVE' | 'EFFECTIVE' | 'AMENDED' | 'REPEALED'
-export type DocumentStatus =
-  'QUEUED' | 'PROCESSING' | 'FAILED' | 'NEEDS_REVIEW' | 'READY' | 'PUBLISHED'
+export type DocumentStatus = 'QUEUED' | 'PROCESSING' | 'FAILED' | 'WITHDRAWN' | 'PUBLISHED'
 export type NodeKind =
   | 'PART'
   | 'CHAPTER'
@@ -85,6 +84,7 @@ export interface KnowledgeDocument {
   published_at: string | null
   metadata: LegalMetadata
   processing_stage: string
+  failed_stage: string | null
   chunk_count: number
   chunk_total: number
   embedded_count: number
@@ -131,8 +131,16 @@ export interface SourceMetadata {
 }
 export interface DocumentDetail {
   document: KnowledgeDocument
+  revision: number
+  snapshot_state: Record<string, unknown>
   result: ParseResult | null
-  acknowledged_issues: string[]
+  publication: Publication | null
+}
+export interface Publication {
+  revision: number
+  published_at: string
+  embedding_model_id: string | null
+  embedding_dimensions: number | null
 }
 export interface CorrectionInput {
   expected_revision: number
@@ -144,7 +152,6 @@ export interface CorrectionInput {
   verification_note: string
   legal_status: LegalStatus
   version_confirmed: boolean
-  acknowledged_issues: string[]
   reason: string
 }
 export interface SearchHit {
@@ -207,16 +214,15 @@ export interface Segment {
 export const statusLabels: Record<DocumentStatus, string> = {
   QUEUED: '等待处理',
   PROCESSING: '处理中',
-  FAILED: '解析失败',
-  NEEDS_REVIEW: '待审核',
-  READY: '待发布',
+  FAILED: '处理失败',
+  WITHDRAWN: '已撤回',
   PUBLISHED: '已发布',
 }
 export const sourceLabels: Record<SourceKind, string> = {
   OFFICIAL_VERIFIED: '官方已核验',
   USER_UPLOADED: '用户上传',
   THIRD_PARTY: '第三方来源',
-  PENDING_REVIEW: '待审核',
+  PENDING_REVIEW: '来源待核验',
 }
 export const legalLabels: Record<LegalStatus, string> = {
   UNKNOWN: '效力待确认',
@@ -235,6 +241,16 @@ export const nodeLabels: Record<NodeKind, string> = {
   SUBITEM: '目',
   SUPPLEMENT: '附则',
   ANNEX: '附件',
+}
+export const stageLabels: Record<string, string> = {
+  QUEUED: '等待处理',
+  EXTRACTING: '文件解析',
+  STRUCTURING: '法律条文结构化',
+  VALIDATING: '数据校验',
+  CHUNKING: '检索片段准备',
+  VECTORIZING: '向量化处理',
+  PUBLISHING: '自动发布',
+  COMPLETED: '处理完成',
 }
 export const isProcessing = (doc: KnowledgeDocument): boolean =>
   ['QUEUED', 'PROCESSING'].includes(doc.status) ||

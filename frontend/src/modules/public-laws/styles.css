@@ -685,3 +685,56 @@
     width: 100%;
   }
 }
+.public-law-header-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.public-law-vector-progress {
+  margin-bottom: 24px;
+  padding: 20px 24px;
+  border: 1px solid var(--border-color, #dce4ed);
+  border-radius: 12px;
+  background: var(--surface-color, #fff);
+}
+
+.public-law-vector-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+
+.public-law-vector-heading h2 {
+  margin: 0 0 6px;
+  font-size: 17px;
+}
+
+.public-law-vector-heading p {
+  margin: 0;
+  color: #64748b;
+  font-size: 13px;
+}
+
+.public-law-vector-counts,
+.public-law-vector-current {
+  display: flex;
+  gap: 10px 20px;
+  flex-wrap: wrap;
+  margin: 12px 0;
+  font-size: 13px;
+}
+
+.public-law-vector-current strong {
+  overflow-wrap: anywhere;
+}
+
+.public-law-vector-progress summary {
+  cursor: pointer;
+  font-size: 13px;
+}

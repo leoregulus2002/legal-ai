@@ -117,7 +117,7 @@ export const knowledgeApi = {
       await apiClient.post<KnowledgeDocument>(`${doc(base, id)}/vectorize`, {
         expected_revision,
         model_id,
-        reason: '人工发起或重试向量化',
+        reason: '发起或重试向量化，成功后自动发布',
       })
     ).data
   },

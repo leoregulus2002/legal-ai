@@ -4,7 +4,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from app.common.exceptions import AppError
 from app.modules.knowledge.models import KnowledgeBase, KnowledgeDocument
-from app.modules.knowledge.schemas import DocumentDetail, ReviewInput, VectorizeInput
+from app.modules.knowledge.schemas import DocumentActionInput, DocumentDetail, VectorizeInput
 from app.modules.knowledge.service import KnowledgeService
 from app.modules.public_laws import service as official
 from app.modules.public_laws.repository import PublicLawRepository
@@ -137,8 +137,14 @@ class PublicLawLibraryService:
         )
 
     async def import_law(
-        self, identifier: str, data: PublicLawImportInput
+        self, identifier: str, data: PublicLawImportInput, *, from_task: bool = False
     ) -> PublicLawImportResult:
+        if not from_task:
+            await self.repo.admission_lock()
+            if await self.repo.active_task():
+                raise AppError(
+                    "vector_task_active", "已有向量化任务，请查看进度或停止后再操作", 409
+                )
         await self.knowledge.base(data.knowledge_base_id)
         await self.knowledge.embedding_provider(data.embedding_model_id)
         existing = await self.repo.imports([identifier], data.knowledge_base_id)
@@ -160,12 +166,21 @@ class PublicLawLibraryService:
             state = import_state(row, base)
             if state.status in {"COMPLETED", "QUEUED", "PROCESSING"}:
                 return PublicLawImportResult(state=state, action="EXISTING")
-            if row.status == "FAILED" or not row.chunk_count:
+            if (
+                not row.chunk_count
+                or row.chunk_count != row.chunk_total
+                or (
+                    row.status == "FAILED" and row.failed_stage not in {"VECTORIZING", "PUBLISHING"}
+                )
+            ):
                 row.embedding_model_id = data.embedding_model_id
                 await self.knowledge.reparse(
                     base.id,
                     row.id,
-                    ReviewInput(expected_revision=row.revision, reason="重试公开法规导入与向量化"),
+                    DocumentActionInput(
+                        expected_revision=row.revision, reason="重试公开法规导入与向量化"
+                    ),
+                    from_public_task=from_task,
                 )
             else:
                 await self.knowledge.vectorize(
@@ -176,6 +191,7 @@ class PublicLawLibraryService:
                         reason="公开法规补充或重试向量化",
                         model_id=data.embedding_model_id,
                     ),
+                    from_public_task=from_task,
                 )
             return PublicLawImportResult(state=import_state(row, base), action="RETRIED")
         if law is None or content is None:
@@ -187,7 +203,7 @@ class PublicLawLibraryService:
             content,
             "LEGAL",
             law.source_url,
-            "从国家法律法规数据库导入；解析及向量化完成后仍需审核发布",
+            "从国家法律法规数据库导入；解析、结构化、数据校验及向量化成功后自动发布",
             data.embedding_model_id,
         )
         row = await self.knowledge.document(base.id, document.id)

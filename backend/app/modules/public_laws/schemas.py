@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, datetime
 from typing import Annotated, Literal, Self
 from uuid import UUID
 
@@ -132,3 +132,49 @@ class PublicLawImportResult(BaseModel):
 
 class DownloadLink(BaseModel):
     url: str
+
+
+class VectorTaskLaw(BaseModel):
+    id: LawIdentifier
+    title: str = Field(min_length=1, max_length=1000)
+    decision: bool = False
+
+
+class VectorTaskInput(BaseModel):
+    knowledge_base_id: UUID
+    embedding_model_id: UUID
+    query: PublicLawSearch | None = None
+    laws: list[VectorTaskLaw] = Field(default_factory=list, max_length=50)
+
+    @model_validator(mode="after")
+    def validate_scope(self) -> Self:
+        if (self.query is None) == (not self.laws):
+            raise ValueError("请选择检索范围或法规列表")
+        return self
+
+
+class VectorTaskItemView(BaseModel):
+    id: UUID
+    law_id: str
+    title: str
+    status: str
+    document_id: UUID | None
+    error_message: str | None
+
+
+class VectorTaskView(BaseModel):
+    id: UUID
+    status: Literal["RUNNING", "STOPPING", "STOPPED", "COMPLETED", "FAILED"]
+    knowledge_base_id: UUID
+    total: int | None
+    discovered: int
+    completed: int
+    skipped: int
+    failed: int
+    current: VectorTaskItemView | None
+    stage: str | None
+    embedded_count: int
+    chunk_count: int
+    recent: list[VectorTaskItemView]
+    created_at: datetime
+    finished_at: datetime | None

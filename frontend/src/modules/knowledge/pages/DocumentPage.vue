@@ -35,7 +35,14 @@ import type {
   StructureNode,
   VersionCandidate,
 } from '../types'
-import { categoryLabels, isProcessing, legalLabels, sourceLabels, statusLabels } from '../types'
+import {
+  categoryLabels,
+  isProcessing,
+  legalLabels,
+  sourceLabels,
+  stageLabels,
+  statusLabels,
+} from '../types'
 import '../styles.css'
 const route = useRoute()
 const router = useRouter()
@@ -45,9 +52,8 @@ const detail = ref<DocumentDetail>()
 const document = computed(() => detail.value?.document)
 const loading = ref(false)
 const saving = ref(false)
-const activeTab = ref('review')
+const activeTab = ref('structure')
 const nodes = ref<StructureNode[]>([])
-const acknowledged = ref<string[]>([])
 const metadata = reactive<LegalMetadata>({
   title: '',
   authority: '',
@@ -58,7 +64,7 @@ const metadata = reactive<LegalMetadata>({
   category: 'UNCLASSIFIED',
   region: '',
 })
-const review = reactive({
+const attributes = reactive({
   source_kind: 'USER_UPLOADED' as SourceKind,
   source_url: '',
   source_note: '',
@@ -83,7 +89,7 @@ const sourcePage = ref(1)
 const sourceMapPage = ref(1)
 const historyRevision = ref<number | null>(null)
 const historical = ref<DocumentDetail>()
-const actionLabels = { publish: '审核并发布', withdraw: '撤回发布', reparse: '重新解析' }
+const actionLabels = { publish: '恢复发布', withdraw: '撤回发布', reparse: '重新解析' }
 const showError = useErrorMessage()
 const message = useMessage()
 const sourceOptions = Object.entries(sourceLabels).map(([value, label]) => ({ value, label }))
@@ -103,7 +109,8 @@ const auditLabels: Record<string, string> = {
   PARSE: '规则解析完成',
   PARSE_FAILED: '解析未完成',
   CORRECT: '人工修订',
-  PUBLISH: '审核发布',
+  PUBLISH: '发布文档',
+  PROCESS_FAILED: '处理未完成',
   WITHDRAW: '撤回发布',
   REPARSE: '重新解析',
   VECTORIZE: '发起向量化',
@@ -119,8 +126,7 @@ const dirty = computed(() => {
     JSON.stringify(nodes.value) !== JSON.stringify(detail.value.result.nodes) ||
     JSON.stringify(metadata) !== JSON.stringify(detail.value.result.metadata) ||
     reason.value.trim().length > 0 ||
-    acknowledged.value.join('|') !== detail.value.acknowledged_issues.join('|') ||
-    Object.entries(review).some(
+    Object.entries(attributes).some(
       ([key, value]) => value !== document.value?.[key as keyof KnowledgeDocument],
     )
   )
@@ -129,33 +135,6 @@ let timer: ReturnType<typeof setTimeout> | undefined
 let disposed = false
 let refreshing = false
 let pollFailed = false
-let autoSourceAttempted = false
-
-async function completeSourceMetadata(result: DocumentDetail): Promise<DocumentDetail> {
-  const row = result.document
-  if (
-    autoSourceAttempted ||
-    !row.public_law_id ||
-    row.source_metadata ||
-    !result.result ||
-    isProcessing(row) ||
-    !['NEEDS_REVIEW', 'READY'].includes(row.status)
-  )
-    return result
-  autoSourceAttempted = true
-  try {
-    return await knowledgeApi.syncSourceMetadata(
-      baseId.value,
-      row.id,
-      row.public_law_id,
-      row.revision,
-    )
-  } catch (error: unknown) {
-    if (!disposed) showError(error)
-    return result
-  }
-}
-
 async function syncSourceMetadata(): Promise<void> {
   const row = document.value
   if (!row?.public_law_id || disabled.value) return
@@ -188,7 +167,7 @@ function apply(result: DocumentDetail): void {
   detail.value = result
   nodes.value = structuredClone(result.result?.nodes ?? [])
   if (result.result) Object.assign(metadata, result.result.metadata)
-  Object.assign(review, {
+  Object.assign(attributes, {
     source_kind: result.document.source_kind,
     source_url: result.document.source_url,
     source_note: result.document.source_note,
@@ -196,7 +175,6 @@ function apply(result: DocumentDetail): void {
     legal_status: result.document.legal_status,
     version_confirmed: result.document.version_confirmed,
   })
-  acknowledged.value = [...result.acknowledged_issues]
   reason.value = ''
   selectedModel.value = result.document.embedding_model_id
 }
@@ -219,9 +197,7 @@ async function poll(): Promise<void> {
     pollFailed = false
     const changed = row.revision !== detail.value.document.revision || !isProcessing(row)
     if (changed) {
-      const next = await completeSourceMetadata(
-        await knowledgeApi.detail(baseId.value, documentId.value),
-      )
+      const next = await knowledgeApi.detail(baseId.value, documentId.value)
       if (disposed) return
       apply(next)
       if (activeTab.value === 'segments') await loadSegments()
@@ -241,9 +217,7 @@ async function load(): Promise<void> {
   clearTimeout(timer)
   loading.value = true
   try {
-    const result = await completeSourceMetadata(
-      await knowledgeApi.detail(baseId.value, documentId.value),
-    )
+    const result = await knowledgeApi.detail(baseId.value, documentId.value)
     if (disposed) return
     apply(result)
     schedule()
@@ -256,7 +230,7 @@ async function load(): Promise<void> {
 async function save(): Promise<void> {
   if (!document.value || !detail.value?.result) return
   if (!reason.value.trim()) {
-    message.warning('请填写本次校正或审核说明')
+    message.warning('请填写本次修订说明')
     return
   }
   saving.value = true
@@ -265,8 +239,7 @@ async function save(): Promise<void> {
       expected_revision: document.value.revision,
       metadata: { ...metadata },
       nodes: nodes.value,
-      ...review,
-      acknowledged_issues: acknowledged.value,
+      ...attributes,
       reason: reason.value.trim(),
     }
     apply(await knowledgeApi.correct(baseId.value, documentId.value, payload))
@@ -278,11 +251,6 @@ async function save(): Promise<void> {
   } finally {
     saving.value = false
   }
-}
-function setAcknowledged(id: string, checked: boolean): void {
-  acknowledged.value = checked
-    ? [...new Set([...acknowledged.value, id])]
-    : acknowledged.value.filter((value) => value !== id)
 }
 function requestOperation(action: 'publish' | 'withdraw' | 'reparse'): void {
   if (dirty.value) {
@@ -493,8 +461,11 @@ onUnmounted(() => {
             >{{ statusLabels[document.status] }}</NTag
           ><NTag>{{ sourceLabels[document.source_kind] }}</NTag
           ><NTag v-if="document.mode === 'LEGAL'">{{ legalLabels[document.legal_status] }}</NTag
+          ><NTag v-if="document.failed_stage" type="error">
+            {{ stageLabels[document.failed_stage] || '处理' }}失败 </NTag
           ><NButton text @click="processingMessage">查看处理说明</NButton>
         </div>
+        <p class="kb-note">文档发布状态与法律效力独立记录；已发布不代表现行有效。</p>
         <div class="kb-panel">
           <ProcessingProgress :document="document" />
           <div class="kb-toolbar">
@@ -506,19 +477,27 @@ onUnmounted(() => {
               placeholder="选择 Embedding 模型"
               class="kb-model-select"
             /><NButton
-              :disabled="disabled || !document.chunk_count || !selectedModel"
+              :disabled="
+                disabled ||
+                !document.chunk_count ||
+                !selectedModel ||
+                (document.status === 'FAILED' &&
+                  !['VECTORIZING', 'PUBLISHING'].includes(document.failed_stage ?? ''))
+              "
               :loading="saving"
               @click="vectorize"
-              >{{ document.embedding_status === 'FAILED' ? '重试向量化' : '开始向量化' }}</NButton
+              >{{
+                document.embedding_status === 'FAILED' ? '重试向量化并自动发布' : '向量化并自动发布'
+              }}</NButton
             ><RouterLink v-if="!models.length" to="/settings/models" class="kb-link"
               >配置 Embedding 模型</RouterLink
             >
           </div>
         </div>
         <NTabs v-model:value="activeTab" type="line"
-          ><NTabPane name="review" tab="结构与审核">
+          ><NTabPane name="structure" tab="结构与修订">
             <p class="kb-note">
-              修改只作用于提取信息与原文标注。保存修订会撤销旧版发布，并重新切分；原始文件和历次解析保留。
+              保存修订会撤回当前发布，重新校验并更新检索片段；向量化成功后自动发布。原始文件和历次版本保留。
             </p>
             <template v-if="detail?.result"
               ><div class="kb-review-grid">
@@ -579,32 +558,32 @@ onUnmounted(() => {
                       :maxlength="200"
                       placeholder="例如：2024 年修订版；不自动推断现行有效"
                       :disabled="disabled" /></label
-                  ><NCheckbox v-model:checked="review.version_confirmed" :disabled="disabled"
+                  ><NCheckbox v-model:checked="attributes.version_confirmed" :disabled="disabled"
                     >已对照原件确认法律版本</NCheckbox
                   ><label
                     >法律效力状态<NSelect
-                      v-model:value="review.legal_status"
+                      v-model:value="attributes.legal_status"
                       :options="legalOptions"
                       :disabled="disabled" /></label
                   ><label
                     >来源分类<NSelect
-                      v-model:value="review.source_kind"
+                      v-model:value="attributes.source_kind"
                       :options="sourceOptions"
                       :disabled="disabled" /></label
                   ><label
                     >来源地址<NInput
-                      v-model:value="review.source_url"
+                      v-model:value="attributes.source_url"
                       :maxlength="2000"
                       :disabled="disabled" /></label
                   ><label
                     >来源说明<NInput
-                      v-model:value="review.source_note"
+                      v-model:value="attributes.source_note"
                       type="textarea"
                       :maxlength="2000"
                       :disabled="disabled" /></label
                   ><label
                     >官方核验说明<NInput
-                      v-model:value="review.verification_note"
+                      v-model:value="attributes.verification_note"
                       type="textarea"
                       :maxlength="2000"
                       placeholder="官方已核验需填写核验说明和官方来源地址"
@@ -624,17 +603,9 @@ onUnmounted(() => {
                     <small v-if="issue.start !== null"
                       >原文位置 {{ issue.start }}–{{ issue.end
                       }}<template v-if="issue.node_id"> · {{ issue.node_id }}</template></small
-                    ><NCheckbox
-                      v-if="issue.severity === 'WARNING'"
-                      :checked="acknowledged.includes(issue.id)"
-                      :disabled="disabled"
-                      @update:checked="setAcknowledged(issue.id, $event)"
-                      >已核对原件并确认</NCheckbox
                     >
                   </div>
-                  <p class="kb-muted">
-                    错误不能通过勾选跳过。条文不连续仅作检查提示，确认后可保留原编号。
-                  </p>
+                  <p class="kb-muted">校验错误会阻止发布。警告仅供核对，不需要人工审核确认。</p>
                 </div>
               </div>
               <div v-if="document.mode === 'LEGAL'" class="kb-panel">
@@ -642,11 +613,11 @@ onUnmounted(() => {
               </div>
               <div class="kb-panel kb-form">
                 <label
-                  >本次校正 / 审核说明<NInput
+                  >本次修订说明<NInput
                     v-model:value="reason"
                     type="textarea"
                     :maxlength="2000"
-                    placeholder="说明修改原因或逐项核验依据，将写入审计记录"
+                    placeholder="说明修改原因，将写入操作记录"
                     :disabled="disabled"
                 /></label>
                 <div class="kb-inline">
@@ -655,22 +626,29 @@ onUnmounted(() => {
                     :loading="saving"
                     :disabled="disabled || !dirty"
                     @click="save"
-                    >保存修订与审核确认</NButton
+                    >保存修订</NButton
                   ><span v-if="dirty" class="kb-muted">有尚未保存的修改</span>
                 </div>
               </div> </template
-            ><NEmpty v-else description="完成文本提取与解析后，可在此审核与校正" class="kb-empty" />
+            ><NEmpty v-else description="完成文件解析后，可在此查看结构与修订" class="kb-empty" />
             <div class="kb-footer-actions">
               <NButton
-                v-if="document.status !== 'PUBLISHED'"
+                v-if="document.status === 'WITHDRAWN'"
                 type="primary"
                 :disabled="disabled || !detail?.result || !document.chunk_count"
                 @click="requestOperation('publish')"
-                >审核并发布</NButton
-              ><NButton v-else :disabled="disabled" @click="requestOperation('withdraw')"
+                >恢复发布</NButton
+              ><NButton
+                v-if="document.status === 'PUBLISHED'"
+                :disabled="disabled"
+                @click="requestOperation('withdraw')"
                 >撤回发布</NButton
-              ><NButton :disabled="disabled" @click="requestOperation('reparse')"
-                >重新解析原件</NButton
+              ><NButton :disabled="disabled" @click="requestOperation('reparse')">{{
+                document.status === 'FAILED' &&
+                !['VECTORIZING', 'PUBLISHING'].includes(document.failed_stage ?? '')
+                  ? '重试文件处理'
+                  : '重新解析原件'
+              }}</NButton
               ><NPopconfirm @positive-click="remove"
                 ><template #trigger
                   ><NButton type="error" quaternary :disabled="saving">删除文档</NButton></template
@@ -723,7 +701,7 @@ onUnmounted(() => {
           >
           <NTabPane name="segments" tab="切分片段"
             ><p class="kb-note">
-              这些是当前修订的待审片段；仅发布后才进入正式检索。共 {{ segmentTotal }} 个片段。
+              这些是当前修订的检索片段；自动发布后即可检索。共 {{ segmentTotal }} 个片段。
             </p>
             <article v-for="segment in segments" :key="segment.id" class="kb-search-hit">
               <div class="kb-section-heading">
@@ -782,12 +760,13 @@ onUnmounted(() => {
           >
           <NTabPane name="audit" tab="解析与操作记录"
             ><p class="kb-note">
-              当前为无登录的单工作空间；操作来源记录为工作空间操作，不推断真实人员身份。
+              自动发布记录为系统操作；人工操作记录为工作空间操作，不推断真实人员身份。
             </p>
             <article v-for="entry in audit" :key="entry.id" class="kb-audit-entry">
               <div class="kb-inline">
                 <strong>{{ auditLabels[entry.action] || entry.action }}</strong
                 ><NTag v-if="entry.revision !== null" size="small">r{{ entry.revision }}</NTag
+                ><NTag size="small">{{ entry.actor === 'system' ? '系统' : '工作空间' }}</NTag
                 ><span class="kb-muted">{{
                   new Date(entry.created_at).toLocaleString('zh-CN')
                 }}</span>
@@ -818,9 +797,24 @@ onUnmounted(() => {
                   {{ historical.result.metadata.title }} · {{ historical.result.method }} ·
                   {{ historical.result.nodes.length }} 个结构节点
                 </p>
+                <p v-if="historical.publication" class="kb-muted">
+                  r{{ historical.publication.revision }} 曾于
+                  {{ new Date(historical.publication.published_at).toLocaleString('zh-CN') }} 发布
+                </p>
+                <p v-else class="kb-muted">该修订暂无发布记录</p>
                 <details>
                   <summary>完整历史解析结果</summary>
-                  <pre class="kb-diff">{{ JSON.stringify(historical.result, null, 2) }}</pre>
+                  <pre class="kb-diff">{{
+                    JSON.stringify(
+                      {
+                        revision: historical.revision,
+                        state: historical.snapshot_state,
+                        result: historical.result,
+                      },
+                      null,
+                      2,
+                    )
+                  }}</pre>
                 </details></template
               >
             </div></NTabPane
@@ -845,9 +839,9 @@ onUnmounted(() => {
         <p class="kb-note">
           {{
             operation === 'publish'
-              ? '发布会将当前修订的原文片段加入正式搜索，法律版本与全部校验提示须已确认。'
+              ? '恢复当前修订的全文、法条和向量检索。系统将检查数据校验与向量完整性。'
               : operation === 'reparse'
-                ? '将保留原件与历史解析，撤销当前发布，重新提取与切分。人工校正内容留在历史修订中。'
+                ? '保留原件与历史版本，撤回当前发布，重新解析、结构化、校验及向量化，成功后自动发布。'
                 : '撤回后将立即移除正式搜索片段。'
           }}
         </p>

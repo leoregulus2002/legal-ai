@@ -1,4 +1,5 @@
 from typing import Annotated, Literal
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, Path, Query, Request, Response
 
@@ -21,7 +22,10 @@ from app.modules.public_laws.schemas import (
     PublicLawOptions,
     PublicLawPage,
     PublicLawSearch,
+    VectorTaskInput,
+    VectorTaskView,
 )
+from app.modules.public_laws.task_service import PublicLawTaskService
 
 router = APIRouter(prefix="/public-laws", tags=["public-laws"])
 LawId = Annotated[str, Path(pattern=r"^[A-Za-z0-9_-]{1,100}$")]
@@ -36,6 +40,28 @@ def get_library(request: Request, session: SessionDependency) -> PublicLawLibrar
 
 
 Library = Annotated[PublicLawLibraryService, Depends(get_library)]
+
+
+def get_tasks(library: Library) -> PublicLawTaskService:
+    return PublicLawTaskService(library.repo, library.knowledge)
+
+
+Tasks = Annotated[PublicLawTaskService, Depends(get_tasks)]
+
+
+@router.get("/vector-tasks/latest", response_model=VectorTaskView | None)
+async def latest_task(tasks: Tasks) -> VectorTaskView | None:
+    return await tasks.latest()
+
+
+@router.post("/vector-tasks", response_model=VectorTaskView, status_code=202)
+async def start_task(data: VectorTaskInput, tasks: Tasks) -> VectorTaskView:
+    return await tasks.start(data)
+
+
+@router.post("/vector-tasks/{task_id}/stop", response_model=VectorTaskView)
+async def stop_task(task_id: UUID, tasks: Tasks) -> VectorTaskView:
+    return await tasks.stop(task_id)
 
 
 @router.get("/options", response_model=PublicLawOptions)

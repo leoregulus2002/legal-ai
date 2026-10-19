@@ -272,8 +272,11 @@
   outline: 1px solid #ac8c59;
   color: #9a7846;
 }
-.kb-stages .disabled {
-  opacity: 0.45;
+.kb-stages .failed {
+  color: #b44338;
+}
+.kb-stages .failed > span {
+  outline: 1px solid #b44338;
 }
 .kb-panel {
   background: #fffefa;

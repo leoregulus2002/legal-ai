@@ -3,6 +3,7 @@ from uuid import UUID, uuid4
 
 from sqlalchemy import Float, and_, case, cast, delete, func, insert, or_, select, true, update
 from sqlalchemy.dialects.postgresql import array
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 
@@ -11,10 +12,12 @@ from app.modules.knowledge.models import (
     KnowledgeBase,
     KnowledgeChunk,
     KnowledgeDocument,
+    KnowledgePublication,
     KnowledgeSegment,
     ParseRevision,
 )
 from app.modules.knowledge.retrieval import LEXICAL_VERSION, LexicalIndex
+from app.modules.public_laws.models import PublicLawVectorItem, PublicLawVectorTask
 
 
 class KnowledgeRepository:
@@ -120,6 +123,28 @@ class KnowledgeRepository:
                 .where(ParseRevision.document_id == document_id)
                 .order_by(ParseRevision.revision.desc())
             )
+        )
+
+    async def publication(self, document_id: UUID, revision: int) -> KnowledgePublication | None:
+        return await self.session.scalar(
+            select(KnowledgePublication).where(
+                KnowledgePublication.document_id == document_id,
+                KnowledgePublication.revision == revision,
+            )
+        )
+
+    async def record_publication(self, row: KnowledgeDocument) -> None:
+        await self.session.execute(
+            pg_insert(KnowledgePublication)
+            .values(
+                document_id=row.id,
+                revision=row.revision,
+                published_at=row.published_at,
+                embedding_model_id=row.embedding_model_id,
+                embedding_fingerprint=row.embedding_fingerprint,
+                embedding_dimensions=row.embedding_dimensions,
+            )
+            .on_conflict_do_nothing(index_elements=["document_id", "revision"])
         )
 
     async def same_hash(self, base_id: UUID, file_hash: str) -> UUID | None:
@@ -266,25 +291,35 @@ class KnowledgeRepository:
             )
         )
 
-    async def claim(self, task: str) -> tuple[UUID, UUID, UUID, str] | None:
+    async def claim(
+        self, task: str, *, document_id: UUID | None = None
+    ) -> tuple[UUID, UUID, UUID, str] | None:
         now = datetime.now(UTC)
         expired = and_(
             KnowledgeDocument.processing_token.is_not(None), KnowledgeDocument.lease_until < now
         )
-        queued = (
+        queued = and_(
+            KnowledgeDocument.processing_token.is_(None),
             KnowledgeDocument.status == "QUEUED"
             if task == "PARSE"
-            else and_(
+            else or_(
                 KnowledgeDocument.embedding_status == "QUEUED",
-                KnowledgeDocument.processing_token.is_(None),
-            )
+                and_(
+                    KnowledgeDocument.processing_stage == "PUBLISHING",
+                    KnowledgeDocument.embedding_status == "COMPLETED",
+                ),
+            ),
         )
         eligible = (
-            KnowledgeDocument.status.in_(["QUEUED", "PROCESSING"])
+            and_(
+                KnowledgeDocument.status.in_(["QUEUED", "PROCESSING"]),
+                KnowledgeDocument.processing_stage.not_in(["VECTORIZING", "PUBLISHING"]),
+            )
             if task == "PARSE"
             else and_(
-                KnowledgeDocument.status.not_in(["QUEUED", "PROCESSING", "FAILED"]),
-                KnowledgeDocument.embedding_status.in_(["QUEUED", "PROCESSING"]),
+                KnowledgeDocument.status == "PROCESSING",
+                KnowledgeDocument.processing_stage.in_(["VECTORIZING", "PUBLISHING"]),
+                KnowledgeDocument.embedding_status.in_(["QUEUED", "PROCESSING", "COMPLETED"]),
             )
         )
         row = await self.session.scalar(
@@ -295,6 +330,15 @@ class KnowledgeRepository:
                 KnowledgeBase.deleted_at.is_(None),
                 eligible,
                 or_(queued, expired),
+                KnowledgeDocument.id == document_id
+                if document_id
+                else ~select(PublicLawVectorItem.id)
+                .join(PublicLawVectorTask)
+                .where(
+                    PublicLawVectorItem.document_id == KnowledgeDocument.id,
+                    PublicLawVectorTask.status.in_(["RUNNING", "STOPPING"]),
+                )
+                .exists(),
             )
             .order_by(KnowledgeDocument.created_at)
             .with_for_update(of=KnowledgeDocument, skip_locked=True)
@@ -312,6 +356,7 @@ class KnowledgeRepository:
             )
         else:
             row.embedding_status, row.processing_stage = "PROCESSING", "VECTORIZING"
+            row.status_message = "正在向量化，完成后自动发布"
         row.updated_at = now
         return row.id, row.knowledge_base_id, token, task
 
@@ -330,6 +375,23 @@ class KnowledgeRepository:
                 .limit(limit)
             )
         )
+
+    async def segment_readiness(self, row: KnowledgeDocument) -> tuple[int, int, int]:
+        counts = (
+            await self.session.execute(
+                select(
+                    func.count(),
+                    func.count(KnowledgeSegment.embedding),
+                    func.count().filter(
+                        func.vector_dims(KnowledgeSegment.embedding) != row.embedding_dimensions
+                    ),
+                ).where(
+                    KnowledgeSegment.document_id == row.id,
+                    KnowledgeSegment.revision == row.revision,
+                )
+            )
+        ).one()
+        return int(counts[0]), int(counts[1]), int(counts[2])
 
     async def write_embedding(self, segment_id: UUID, embedding: list[float]) -> None:
         await self.session.execute(

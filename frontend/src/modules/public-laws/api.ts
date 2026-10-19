@@ -8,9 +8,37 @@ import type {
   PublicLawOptions,
   PublicLawPage,
   PublicLawQuery,
+  VectorTask,
 } from './types'
 
 export const publicLawApi = {
+  async latestTask(): Promise<VectorTask | null> {
+    return (await apiClient.get<VectorTask | null>('/public-laws/vector-tasks/latest')).data
+  },
+  async startTask(
+    knowledgeBaseId: string,
+    embeddingModelId: string,
+    scope: { query: PublicLawQuery } | { laws: PublicLaw[] },
+  ): Promise<VectorTask> {
+    return (
+      await apiClient.post<VectorTask>('/public-laws/vector-tasks', {
+        knowledge_base_id: knowledgeBaseId,
+        embedding_model_id: embeddingModelId,
+        ...('query' in scope
+          ? { query: scope.query }
+          : {
+              laws: scope.laws.map((law) => ({
+                id: law.id,
+                title: law.title,
+                decision: law.category === '修改、废止的决定',
+              })),
+            }),
+      })
+    ).data
+  },
+  async stopTask(id: string): Promise<VectorTask> {
+    return (await apiClient.post<VectorTask>(`/public-laws/vector-tasks/${id}/stop`)).data
+  },
   async importLaw(
     law: PublicLaw,
     knowledgeBaseId: string,

@@ -19,7 +19,7 @@ LegalCategory = Literal[
     "JUDICIAL_INTERPRETATION",
     "OTHER",
 ]
-DocumentStatus = Literal["QUEUED", "PROCESSING", "FAILED", "NEEDS_REVIEW", "READY", "PUBLISHED"]
+DocumentStatus = Literal["QUEUED", "PROCESSING", "FAILED", "WITHDRAWN", "PUBLISHED"]
 NodeKind = Literal[
     "PART", "CHAPTER", "SECTION", "ARTICLE", "PARAGRAPH", "ITEM", "SUBITEM", "SUPPLEMENT", "ANNEX"
 ]
@@ -141,6 +141,7 @@ class DocumentView(BaseModel):
     revision: int
     status_message: str
     processing_stage: str
+    failed_stage: str | None
     chunk_count: int
     chunk_total: int
     embedded_count: int
@@ -161,10 +162,20 @@ class DocumentPage(BaseModel):
     page_size: int
 
 
+class PublicationView(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    revision: int
+    published_at: datetime
+    embedding_model_id: UUID | None
+    embedding_dimensions: int | None
+
+
 class DocumentDetail(BaseModel):
     document: DocumentView
+    revision: int
+    snapshot_state: dict[str, object]
     result: ParseResult | None
-    acknowledged_issues: list[str]
+    publication: PublicationView | None
 
 
 class CorrectionInput(BaseModel):
@@ -177,11 +188,10 @@ class CorrectionInput(BaseModel):
     verification_note: str = Field(default="", max_length=2000)
     legal_status: LegalStatus = "UNKNOWN"
     version_confirmed: bool = False
-    acknowledged_issues: list[str] = Field(default_factory=list, max_length=20000)
     reason: str = Field(min_length=1, max_length=2000)
 
 
-class ReviewInput(BaseModel):
+class DocumentActionInput(BaseModel):
     expected_revision: int = Field(ge=0)
     reason: str = Field(min_length=1, max_length=2000)
 
@@ -245,7 +255,7 @@ class SearchPage(BaseModel):
     candidate_limit: int = 100
 
 
-class VectorizeInput(ReviewInput):
+class VectorizeInput(DocumentActionInput):
     model_id: UUID
 
 

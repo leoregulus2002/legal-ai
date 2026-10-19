@@ -19,8 +19,9 @@ from app.modules.knowledge.models import KnowledgeDocument, ParseRevision
 from app.modules.knowledge.parser import parse
 from app.modules.knowledge.repository import KnowledgeRepository
 from app.modules.knowledge.schemas import LegalStatus, ParseIssue, ParseResult, SourceMetadata
-from app.modules.knowledge.service import KnowledgeService, ready_status, review_state
+from app.modules.knowledge.service import KnowledgeService, document_state
 from app.modules.knowledge.validation import validate_structure
+from app.modules.public_laws.repository import PublicLawRepository
 
 logger = logging.getLogger(__name__)
 
@@ -30,12 +31,28 @@ class KnowledgeWorker:
         self.sessions, self.settings = sessions, settings
 
     async def locked(
-        self, repo: KnowledgeRepository, base_id: UUID, document_id: UUID, token: UUID
+        self,
+        repo: KnowledgeRepository,
+        base_id: UUID,
+        document_id: UUID,
+        token: UUID,
+        *,
+        allow_stopping: bool = False,
     ) -> KnowledgeDocument | None:
         if not await repo.base(base_id, lock=True):
             return None
         row = await repo.document(document_id, lock=True)
         if row is None or row.processing_token != token:
+            return None
+        if not allow_stopping and await PublicLawRepository(repo.session).document_stop_requested(
+            document_id
+        ):
+            await KnowledgeService(repo, self.settings).fail_processing(
+                row,
+                row.processing_stage,
+                "任务已停止，已完成的向量已保留",
+                code="vector_task_stopped",
+            )
             return None
         row.lease_until, row.updated_at = (
             datetime.now(UTC) + timedelta(minutes=10),
@@ -49,6 +66,11 @@ class KnowledgeWorker:
             if row is None:
                 return False
             row.processing_stage = stage
+            row.status_message = {
+                "STRUCTURING": "正在结构化法律条文",
+                "VALIDATING": "正在校验正文和法律条文结构",
+                "CHUNKING": "正在准备检索片段",
+            }[stage]
         return True
 
     async def process(self, document_id: UUID, base_id: UUID, token: UUID) -> None:
@@ -74,10 +96,9 @@ class KnowledgeWorker:
             return
         result = await anyio.to_thread.run_sync(parse, extracted, mode)
         merge_source_metadata(result, source_metadata, previous)
-        result.issues = await anyio.to_thread.run_sync(validate_structure, result, mode)
-        if not await self.stage(base_id, document_id, token, "CHUNKING"):
+        if not await self.stage(base_id, document_id, token, "VALIDATING"):
             return
-        segments = await anyio.to_thread.run_sync(split_document, result, mode)
+        result.issues = await anyio.to_thread.run_sync(validate_structure, result, mode)
         async with self.sessions.begin() as session:
             repo = KnowledgeRepository(session)
             row = await self.locked(repo, base_id, document_id, token)
@@ -91,17 +112,31 @@ class KnowledgeWorker:
             elif result.metadata_sources.get("legal_status") == "HUMAN":
                 row.legal_status = previous_status
             row.content_hash = hashlib.sha256(result.text.encode()).hexdigest()
-            row.chunk_total, row.chunk_count, row.embedded_count = len(segments), 0, 0
+            row.chunk_total, row.chunk_count, row.embedded_count = 0, 0, 0
             row.embedding_dimensions, row.embedding_fingerprint = None, None
             await repo.save(
                 ParseRevision(
                     document_id=row.id,
                     revision=revision,
                     result=result.model_dump(mode="json"),
-                    review_state=review_state(row),
-                    acknowledged_issues=[],
+                    review_state=document_state(row),
                 )
             )
+            errors = [issue for issue in result.issues if issue.severity == "ERROR"]
+            if errors:
+                await KnowledgeService(repo, self.settings).fail_processing(
+                    row,
+                    "VALIDATING",
+                    "数据校验未通过，请修订或重新解析后重试",
+                    code="validation_failed",
+                    issue_codes=[issue.code for issue in errors],
+                )
+                return
+        if not await self.stage(base_id, document_id, token, "CHUNKING"):
+            return
+        segments = await anyio.to_thread.run_sync(split_document, result, mode)
+        if not segments:
+            raise AppError("no_segments", "文档没有可用正文片段，请重新解析")
         for start in range(0, len(segments), 100):
             async with self.sessions.begin() as session:
                 repo = KnowledgeRepository(session)
@@ -121,16 +156,26 @@ class KnowledgeWorker:
                     for index, segment in enumerate(segments[start : start + 100], start)
                 ]
                 await repo.append_segments(values)
+                row.chunk_total = len(segments)
                 row.chunk_count += len(values)
         async with self.sessions.begin() as session:
             repo = KnowledgeRepository(session)
             row = await self.locked(repo, base_id, document_id, token)
             if row is None:
                 return
-            row.status = ready_status(result, [])
-            row.processing_stage, row.status_message = "COMPLETED", "解析及切分完成，等待人工审核"
+            if not row.embedding_model_id:
+                await KnowledgeService(repo, self.settings).fail_processing(
+                    row,
+                    "VECTORIZING",
+                    "请选择向量模型后重试向量化",
+                    code="embedding_model_required",
+                )
+                return
+            row.status, row.processing_stage = "PROCESSING", "VECTORIZING"
+            row.status_message = "解析与数据校验完成，等待向量化后自动发布"
             row.processing_token, row.lease_until = None, None
-            row.embedding_status = "QUEUED" if row.embedding_model_id and segments else "DISABLED"
+            row.embedding_status, row.embedding_message = "QUEUED", ""
+            row.failed_stage = None
             await KnowledgeService(repo, self.settings).audit(
                 base_id,
                 "PARSE",
@@ -145,8 +190,10 @@ class KnowledgeWorker:
             async with self.sessions.begin() as session:
                 repo = KnowledgeRepository(session)
                 row = await self.locked(repo, base_id, document_id, token)
-                if row is None or not row.embedding_model_id:
+                if row is None:
                     return
+                if not row.embedding_model_id:
+                    raise AppError("embedding_model_required", "请选择向量模型后重试向量化")
                 provider = await KnowledgeService(repo, self.settings).embedding_provider(
                     row.embedding_model_id
                 )
@@ -156,8 +203,12 @@ class KnowledgeWorker:
                 revision, expected_dimensions = row.revision, row.embedding_dimensions
                 batch = await repo.embedding_batch(row, limit=provider.batch_size)
                 if not batch:
-                    row.embedding_status, row.processing_stage = "COMPLETED", "COMPLETED"
-                    row.embedding_message, row.processing_token, row.lease_until = "", None, None
+                    row.embedding_status = "COMPLETED"
+                    row.embedding_message = ""
+                    row.processing_stage, row.status_message = (
+                        "PUBLISHING",
+                        "向量化完成，正在自动发布",
+                    )
                     await KnowledgeService(repo, self.settings).audit(
                         base_id,
                         "EMBED_COMPLETE",
@@ -166,8 +217,16 @@ class KnowledgeWorker:
                         completed=row.embedded_count,
                         dimensions=row.embedding_dimensions,
                     )
-                    return
                 values = [(segment.id, segment.content) for segment in batch]
+            if not values:
+                async with self.sessions.begin() as session:
+                    repo = KnowledgeRepository(session)
+                    row = await self.locked(repo, base_id, document_id, token)
+                    if row is None:
+                        return
+                    await KnowledgeService(repo, self.settings).auto_publish(row)
+                    row.processing_token, row.lease_until = None, None
+                return
             vectors = await provider.embed([content for _, content in values])
             if expected_dimensions and len(vectors[0]) != expected_dimensions:
                 raise AppError(
@@ -175,7 +234,8 @@ class KnowledgeWorker:
                 )
             async with self.sessions.begin() as session:
                 repo = KnowledgeRepository(session)
-                row = await self.locked(repo, base_id, document_id, token)
+                # 在途请求返回的本批向量先落库；下一轮检查停止，避免恢复时重复调用。
+                row = await self.locked(repo, base_id, document_id, token, allow_stopping=True)
                 if row is None or row.revision != revision:
                     return
                 # 调用期间发生的模型配置修改也不能混入同一批向量。
@@ -202,19 +262,17 @@ class KnowledgeWorker:
                 if isinstance(exc, AppError)
                 else "处理未完成，原件已保留，请检查文件或配置后重试"
             )
-            row.processing_token, row.lease_until, row.processing_stage = None, None, "FAILED"
-            if task == "PARSE":
-                row.status, row.status_message = "FAILED", message
-                row.embedding_status = "DISABLED" if not row.embedding_model_id else "FAILED"
-                # 保留失败快照，上一轮成功或部分解析快照亦不覆盖。
+            stage = row.processing_stage
+            if task == "PARSE" and stage in {"EXTRACTING", "STRUCTURING"}:
+                # 原始解析失败也保留独立修订，不覆盖先前成功或失败的快照。
                 result = ParseResult(
                     text="",
                     extraction_issues=[
                         ParseIssue(
-                            id="extraction_failed",
-                            code="extraction_failed",
+                            id="processing_failed",
+                            code="processing_failed",
                             severity="ERROR",
-                            message=message,
+                            message="文件解析未完成，请查看处理说明并重试",
                         )
                     ],
                 )
@@ -224,11 +282,6 @@ class KnowledgeWorker:
                     result.metadata = previous.metadata.model_copy(deep=True)
                     result.metadata_sources = previous.metadata_sources.copy()
                     merge_source_metadata(result, None, previous)
-                failure_review_state = review_state(row)
-                if snapshot and result.metadata_sources.get("legal_status") == "HUMAN":
-                    failure_review_state["legal_status"] = snapshot.review_state.get(
-                        "legal_status", "UNKNOWN"
-                    )
                 result.issues = result.extraction_issues
                 row.revision += 1
                 await repo.save(
@@ -236,15 +289,15 @@ class KnowledgeWorker:
                         document_id=row.id,
                         revision=row.revision,
                         result=result.model_dump(mode="json"),
-                        review_state=failure_review_state,
-                        acknowledged_issues=[],
+                        review_state=document_state(row),
                     )
                 )
                 row.chunk_count = row.chunk_total = 0
-            else:
-                row.embedding_status, row.embedding_message = "FAILED", message
-            await KnowledgeService(repo, self.settings).audit(
-                base_id, f"{task}_FAILED", message, row
+            await KnowledgeService(repo, self.settings).fail_processing(
+                row,
+                stage,
+                message,
+                code=exc.code if isinstance(exc, AppError) else "unexpected_error",
             )
 
     async def run(self, task_kind: str) -> None:
@@ -284,6 +337,7 @@ class KnowledgeWorker:
                                     row.status, row.processing_stage = "QUEUED", "QUEUED"
                                 else:
                                     row.embedding_status = "QUEUED"
+                                    row.processing_stage = "VECTORIZING"
                     except Exception:
                         logger.warning("知识库退出时归还租约失败")
                 raise

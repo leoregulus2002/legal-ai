@@ -149,7 +149,7 @@ onMounted(() => {
         <section class="form-section">
           <h2>知识库接入</h2>
           <p>
-            添加已有的内部知识库，法律对话仅检索所选库中已审核发布的资料。
+            添加已有的内部知识库，法律对话仅检索所选库中已发布的资料。
             <RouterLink to="/knowledge">管理内部知识库</RouterLink>
           </p>
           <NFormItem label="添加内部知识库"

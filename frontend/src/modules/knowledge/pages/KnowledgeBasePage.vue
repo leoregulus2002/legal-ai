@@ -95,6 +95,10 @@ async function upload(): Promise<void> {
     message.warning('请选择需要导入的文件')
     return
   }
+  if (!form.model_id) {
+    message.warning('请选择 Embedding 模型，处理成功后将自动发布')
+    return
+  }
   if (files.value.some((file) => file.size > 25 * 1024 * 1024)) {
     message.warning('单个文件不能超过 25 MB')
     return
@@ -120,7 +124,7 @@ async function upload(): Promise<void> {
     page.value = 1
     status.value = ''
     query.value = ''
-    message.success('文件已保存，后台开始解析与切分')
+    message.success('文件已保存，后台处理成功后将自动发布')
   } catch (error: unknown) {
     showError(error)
   } finally {
@@ -199,6 +203,7 @@ onMounted(async () => {
         models.value = (await configApi.models())
           .filter((model) => model.model_type === 'embedding' && model.enabled)
           .map((model) => ({ label: model.name, value: model.id }))
+        form.model_id ??= models.value[0]?.value ?? null
       } catch (error: unknown) {
         showError(error)
       }
@@ -277,7 +282,7 @@ onUnmounted(() => {
               <ProcessingProgress :document="document" compact />
               <div class="kb-actions">
                 <RouterLink :to="`/knowledge/${baseId}/documents/${document.id}`" class="kb-link"
-                  >查看与审核</RouterLink
+                  >查看与管理</RouterLink
                 ><NPopconfirm @positive-click="remove(document)"
                   ><template #trigger
                     ><NButton text type="error" size="small" :loading="deleting === document.id"
@@ -296,7 +301,9 @@ onUnmounted(() => {
           @update:page="load()"
         /> </NTabPane
       ><NTabPane name="search" tab="正式内容搜索">
-        <p class="kb-note">搜索范围仅含已审核发布的文档。历史法律版本保留独立来源与效力标注。</p>
+        <p class="kb-note">
+          搜索范围仅含已发布文档。发布不代表法律现行有效，历史法律版本保留独立效力标注。
+        </p>
         <form class="kb-toolbar" @submit.prevent="search(true)">
           <NInput
             v-model:value="searchQuery"
@@ -382,16 +389,14 @@ onUnmounted(() => {
           </li>
         </ul>
         <label
-          >向量化模型（可稍后选择）<NSelect
+          >向量化模型<NSelect
             v-model:value="form.model_id"
             :options="models"
             clearable
-            placeholder="不启用向量化"
+            placeholder="请选择向量化模型"
             :disabled="uploading"
         /></label>
-        <p v-if="!models.length" class="kb-muted">
-          可在“模型配置”添加 Embedding 模型，再启用真实向量化。
-        </p>
+        <p v-if="!models.length" class="kb-muted">请先在“模型配置”添加并启用 Embedding 模型。</p>
         <label
           >来源地址<NInput
             v-model:value="form.source_url"
@@ -405,6 +410,9 @@ onUnmounted(() => {
             :maxlength="2000"
             :disabled="uploading"
         /></label>
+        <p class="kb-note">
+          上传后依次解析、结构化、数据校验、向量化，成功后自动发布；任一步失败均不发布，可查看原因并重试。
+        </p>
         <p class="kb-muted">上传资料默认标记“用户上传”，需核验后才能更改来源分类。</p>
         <NProgress
           v-if="uploading"

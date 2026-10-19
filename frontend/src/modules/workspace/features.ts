@@ -33,7 +33,7 @@ export const workspaceFeatures: readonly WorkspaceFeature[] = [
   {
     id: 'knowledge',
     title: '法律知识库',
-    description: '管理资料、法律版本与解析审核。',
+    description: '管理资料、法律版本与自动发布。',
     icon: 'book',
     to: '/knowledge',
   },

@@ -1,15 +1,14 @@
 <script setup lang="ts">
-import { computed, onUnmounted, ref, watch } from 'vue'
+import { onUnmounted, ref, watch } from 'vue'
 import { NButton, NEmpty, NModal, NSelect, NSpin, useMessage } from 'naive-ui'
 import { useErrorMessage } from '../../../composables/useErrorMessage'
 import { knowledgeApi } from '../../knowledge/api'
 import { configApi } from '../../system-config/api'
 import { publicLawApi } from '../api'
-import type { PublicLaw, PublicLawImportResult } from '../types'
-import { vectorizationLabels } from '../types'
+import type { PublicLaw, PublicLawQuery, VectorTask } from '../types'
 
-const props = defineProps<{ laws: PublicLaw[] }>()
-const emit = defineEmits<{ close: []; imported: [] }>()
+const props = defineProps<{ laws: PublicLaw[]; query?: PublicLawQuery | null }>()
+const emit = defineEmits<{ close: []; started: [task: VectorTask] }>()
 const message = useMessage()
 const showError = useErrorMessage()
 const baseId = ref<string | null>(null)
@@ -20,9 +19,6 @@ const loading = ref(false)
 const optionsLoaded = ref(false)
 const basesLoading = ref(false)
 const submitting = ref(false)
-const completed = ref<Record<string, PublicLawImportResult>>({})
-const currentTitle = ref('')
-const remaining = computed(() => props.laws.filter((law) => !completed.value[law.id]))
 let alive = true
 let optionsSequence = 0
 let basesSequence = 0
@@ -62,6 +58,8 @@ async function loadOptions(): Promise<void> {
     models.value = configurations
       .filter((model) => model.enabled && model.model_type === 'embedding')
       .map((model) => ({ label: model.name, value: model.id }))
+    if (bases.value.length === 1) baseId.value = bases.value[0]!.value
+    if (models.value.length === 1) modelId.value = models.value[0]!.value
     optionsLoaded.value = true
   } catch (error: unknown) {
     if (alive && request === optionsSequence) showError(error)
@@ -78,47 +76,35 @@ async function submit(): Promise<void> {
   }
   const selectedBase = baseId.value
   const selectedModel = modelId.value
-  const pending = [...remaining.value]
   submitting.value = true
-  let accepted = 0
-  let existing = 0
   try {
-    for (const law of pending) {
-      if (!alive) break
-      currentTitle.value = law.title
-      try {
-        const data = await publicLawApi.importLaw(law, selectedBase, selectedModel)
-        if (!alive) break
-        completed.value[law.id] = data
-        if (data.action === 'EXISTING') existing++
-        else accepted++
-      } catch (error: unknown) {
-        if (alive) showError(error)
-      }
-    }
+    const task = await publicLawApi.startTask(
+      selectedBase,
+      selectedModel,
+      props.query ? { query: props.query } : { laws: props.laws },
+    )
+    if (!alive) return
+    message.success('向量化任务已开始，法规将逐条处理')
+    emit('started', task)
+    emit('close')
+  } catch (error: unknown) {
+    if (alive) showError(error)
   } finally {
-    if (alive) {
-      submitting.value = false
-      currentTitle.value = ''
-      if (accepted) message.success(`已提交 ${accepted} 条法规，后台将自动解析、切分并向量化`)
-      if (existing) message.info(`${existing} 条法规已在此知识库中，未重复导入`)
-      if (accepted || existing) emit('imported')
-    }
+    if (alive) submitting.value = false
   }
 }
 
 watch(
-  () => props.laws,
-  (laws) => {
+  () => props.laws.length > 0 || Boolean(props.query),
+  (show) => {
     optionsSequence++
     basesSequence++
     clearTimeout(searchTimer)
     basesLoading.value = false
     loading.value = false
-    if (!laws.length) {
+    if (!show) {
       return
     }
-    completed.value = {}
     baseId.value = null
     modelId.value = null
     bases.value = []
@@ -137,9 +123,9 @@ onUnmounted(() => {
 
 <template>
   <NModal
-    :show="laws.length > 0"
+    :show="laws.length > 0 || Boolean(query)"
     preset="card"
-    title="导入知识库并向量化"
+    title="一键向量化"
     class="public-law-import-dialog"
     :mask-closable="false"
     :closable="!submitting"
@@ -152,7 +138,10 @@ onUnmounted(() => {
   >
     <NSpin :show="loading">
       <p class="public-law-import-note">
-        导入官方原件后，后台会自动解析、切分并调用所选向量模型。完成后仍需在知识库中审核发布。
+        {{
+          query ? '处理当前检索条件下的全部法规，不限当前页。' : `处理所选 ${laws.length} 条法规。`
+        }}
+        每次只处理一条，已向量化法规自动跳过。支持随时停止，关闭页面后任务继续运行。
       </p>
       <div class="public-law-import-fields">
         <label
@@ -160,7 +149,7 @@ onUnmounted(() => {
             v-model:value="baseId"
             :options="bases"
             :loading="basesLoading"
-            :disabled="submitting || Object.keys(completed).length > 0"
+            :disabled="submitting"
             remote
             filterable
             clearable
@@ -172,7 +161,7 @@ onUnmounted(() => {
           >向量模型<NSelect
             v-model:value="modelId"
             :options="models"
-            :disabled="submitting || Object.keys(completed).length > 0"
+            :disabled="submitting"
             filterable
             placeholder="选择已启用的向量模型"
             aria-label="向量模型"
@@ -189,32 +178,19 @@ onUnmounted(() => {
           ></template
         ></NEmpty
       >
-      <p class="public-law-import-progress" aria-live="polite">
-        已处理 {{ Object.keys(completed).length }} / {{ laws.length }} 条<span v-if="currentTitle">
-          · 正在导入：{{ currentTitle }}</span
-        >
-      </p>
-      <ul class="public-law-import-items">
+      <ul v-if="!query" class="public-law-import-items">
         <li v-for="law in laws" :key="law.id">
-          <span>{{ law.title }}</span
-          ><RouterLink
-            v-if="completed[law.id]"
-            :to="`/knowledge/${completed[law.id]!.state.knowledge_base_id}/documents/${completed[law.id]!.state.document_id}`"
-            >{{ vectorizationLabels[completed[law.id]!.state.status] }} · 查看文档</RouterLink
-          >
+          <span>{{ law.title }}</span>
         </li>
       </ul>
       <div class="public-law-import-actions">
-        <NButton :disabled="submitting" @click="emit('close')">{{
-          remaining.length ? '关闭' : '完成'
-        }}</NButton
+        <NButton :disabled="submitting" @click="emit('close')">关闭</NButton
         ><NButton
-          v-if="remaining.length"
           type="primary"
           :loading="submitting"
           :disabled="loading || !baseId || !modelId"
           @click="submit"
-          >导入并向量化（{{ remaining.length }}）</NButton
+          >开始向量化</NButton
         >
       </div>
     </NSpin>

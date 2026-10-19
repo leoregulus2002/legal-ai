@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onUnmounted, ref } from 'vue'
+import { computed, onUnmounted, ref, toRaw } from 'vue'
 import {
   NButton,
   NCheckbox,
@@ -22,6 +22,7 @@ import { useErrorMessage } from '../../../composables/useErrorMessage'
 import { publicLawApi } from '../api'
 import PublicLawPreview from '../components/PublicLawPreview.vue'
 import PublicLawImportDialog from '../components/PublicLawImportDialog.vue'
+import PublicLawVectorProgress from '../components/PublicLawVectorProgress.vue'
 import {
   checkedKeys,
   exportDirectory,
@@ -32,9 +33,10 @@ import {
   vectorizationLabels,
   vectorizationOptions,
 } from '../types'
-import type { PublicLaw } from '../types'
+import type { PublicLaw, PublicLawQuery } from '../types'
 import { usePublicLawSearch } from '../usePublicLawSearch'
 import { usePublicLawDownload } from '../usePublicLawDownload'
+import { usePublicLawVectorTask } from '../usePublicLawVectorTask'
 import '../styles.css'
 
 const {
@@ -66,6 +68,11 @@ const downloadDrawer = ref(false)
 const downloadLinks = ref<{ url: string; title: string }[]>([])
 const previewLaw = ref<PublicLaw | null>(null)
 const importLaws = ref<PublicLaw[]>([])
+const vectorQuery = ref<PublicLawQuery | null>(null)
+const vectorTask = usePublicLawVectorTask(() => {
+  void refreshImportStates()
+})
+const { task, active: vectorizing, stopping, loading: taskLoading } = vectorTask
 const { downloadingId, download } = usePublicLawDownload()
 let alive = true
 onUnmounted(() => {
@@ -133,6 +140,15 @@ function exportSelected(): void {
   exportDirectory(selectedItems.value)
   message.success(`已导出 ${selectedItems.value.length} 条文件目录`)
 }
+
+function startVectorization(): void {
+  vectorQuery.value = structuredClone(toRaw(applied.value))
+}
+
+function closeImport(): void {
+  importLaws.value = []
+  vectorQuery.value = null
+}
 </script>
 
 <template>
@@ -143,11 +159,28 @@ function exportSelected(): void {
         <h1 id="public-law-title">公开法律库</h1>
         <p>检索公开法律法规，查阅官方原文。</p>
       </div>
-      <span class="public-law-source">
-        <AppIcon name="column" :size="20" />
-        <span>国家法律法规数据库</span>
-      </span>
+      <div class="public-law-header-actions">
+        <NButton
+          type="primary"
+          :disabled="vectorizing || taskLoading || loading"
+          @click="startVectorization"
+        >
+          {{ vectorizing ? '向量化进行中' : '一键向量化' }}
+        </NButton>
+        <span class="public-law-source">
+          <AppIcon name="column" :size="20" />
+          <span>国家法律法规数据库</span>
+        </span>
+      </div>
     </header>
+
+    <PublicLawVectorProgress
+      v-if="task"
+      :task="task"
+      :stopping="stopping"
+      @stop="vectorTask.stop"
+      @refresh="vectorTask.refresh"
+    />
 
     <form class="public-law-search" @submit.prevent="submit()">
       <div class="public-law-search-line">
@@ -383,7 +416,7 @@ function exportSelected(): void {
           >
           <NButton
             text
-            :disabled="!selectedItems.length || loading"
+            :disabled="!selectedItems.length || loading || vectorizing || taskLoading"
             @click="importLaws = [...selectedItems]"
             >批量导入知识库并向量化</NButton
           >
@@ -462,7 +495,12 @@ function exportSelected(): void {
                   @click="download(item)"
                   >下载</NButton
                 >
-                <NButton size="small" secondary type="primary" @click="importLaws = [item]"
+                <NButton
+                  size="small"
+                  secondary
+                  type="primary"
+                  :disabled="vectorizing || taskLoading"
+                  @click="importLaws = [item]"
                   >导入并向量化</NButton
                 >
               </div>
@@ -534,8 +572,9 @@ function exportSelected(): void {
     <PublicLawPreview :law="previewLaw" @close="previewLaw = null" />
     <PublicLawImportDialog
       :laws="importLaws"
-      @close="importLaws = []"
-      @imported="refreshImportStates"
+      :query="vectorQuery"
+      @close="closeImport"
+      @started="vectorTask.accept"
     />
   </section>
 </template>

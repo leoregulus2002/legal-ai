@@ -534,7 +534,7 @@ class ConsultationService:
                         title=hit.title,
                         content=(
                             f"[来源分类：{hit.source_kind}；效力状态：{hit.legal_status}；"
-                            f"已审核版本 r{hit.revision}]\n" + hit.content
+                            f"已发布版本 r{hit.revision}]\n" + hit.content
                         ),
                         source=(
                             hit.source_url

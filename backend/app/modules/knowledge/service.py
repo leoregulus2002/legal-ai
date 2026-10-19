@@ -33,6 +33,7 @@ from app.modules.knowledge.schemas import (
     AuditView,
     ComparisonView,
     CorrectionInput,
+    DocumentActionInput,
     DocumentDetail,
     DocumentPage,
     DocumentView,
@@ -41,7 +42,7 @@ from app.modules.knowledge.schemas import (
     KnowledgeView,
     LegalMetadata,
     ParseResult,
-    ReviewInput,
+    PublicationView,
     SearchHit,
     SearchPage,
     SegmentPage,
@@ -51,6 +52,7 @@ from app.modules.knowledge.schemas import (
     VersionCandidate,
 )
 from app.modules.knowledge.validation import validate_structure
+from app.modules.public_laws.repository import PublicLawRepository
 from app.modules.system_config.models import ModelConfig
 from app.modules.system_config.repository import ConfigRepository
 from app.modules.system_config.schemas import Policy
@@ -71,7 +73,7 @@ def document_view(row: KnowledgeDocument) -> DocumentView:
     )
 
 
-def review_state(row: KnowledgeDocument) -> dict[str, object]:
+def document_state(row: KnowledgeDocument) -> dict[str, object]:
     return {
         name: getattr(row, name)
         for name in (
@@ -105,14 +107,6 @@ def validate_source_url(value: str) -> str:
     return value
 
 
-def ready_status(result: ParseResult, acknowledgements: list[str]) -> str:
-    if any(
-        issue.severity == "ERROR" or issue.id not in acknowledgements for issue in result.issues
-    ):
-        return "NEEDS_REVIEW"
-    return "READY"
-
-
 class KnowledgeService:
     def __init__(self, repository: KnowledgeRepository, settings: Settings) -> None:
         self.repo, self.settings = repository, settings
@@ -138,6 +132,8 @@ class KnowledgeService:
         action: str,
         reason: str,
         row: KnowledgeDocument | None = None,
+        *,
+        actor: str = "single-workspace",
         **details: object,
     ) -> None:
         await self.repo.save(
@@ -145,6 +141,7 @@ class KnowledgeService:
                 knowledge_base_id=base_id,
                 document_id=row.id if row else None,
                 action=action,
+                actor=actor,
                 reason=reason,
                 revision=row.revision if row else None,
                 details=details,
@@ -255,8 +252,18 @@ class KnowledgeService:
             raise AppError("document_too_large", "单个文件不能超过 25 MB")
         if not data:
             raise AppError("empty_document", "文件为空，请重新选择")
-        if model_id:
-            await self.embedding_provider(model_id)
+        if model_id is None:
+            model_id = next(
+                (
+                    model.id
+                    for model in await ConfigRepository(self.repo.session).models()
+                    if model.enabled and model.model_type == "embedding"
+                ),
+                None,
+            )
+        if model_id is None:
+            raise AppError("embedding_model_required", "请先配置并启用 Embedding 模型")
+        await self.embedding_provider(model_id)
         await self.base(base_id, lock=True)
         file_hash = hashlib.sha256(data).hexdigest()
         duplicate = await self.repo.same_hash(base_id, file_hash)
@@ -294,10 +301,13 @@ class KnowledgeService:
         )
         if revision is not None and snapshot is None:
             raise AppError("revision_not_found", "解析修订不存在", 404)
+        publication = await self.repo.publication(row.id, snapshot.revision) if snapshot else None
         return DocumentDetail(
             document=document_view(row),
+            revision=snapshot.revision if snapshot else row.revision,
+            snapshot_state=snapshot.review_state if snapshot else {},
             result=ParseResult.model_validate(snapshot.result) if snapshot else None,
-            acknowledged_issues=snapshot.acknowledged_issues if snapshot else [],
+            publication=PublicationView.model_validate(publication) if publication else None,
         )
 
     async def original(self, base_id: UUID, document_id: UUID) -> tuple[KnowledgeDocument, bytes]:
@@ -373,7 +383,7 @@ class KnowledgeService:
             result.anchors = [anchor for anchor in result.anchors if anchor.field not in changed]
             result.method = "HUMAN"
         result.metadata, result.nodes = data.metadata, data.nodes
-        result.issues = validate_structure(result, row.mode)
+        result.issues = await anyio.to_thread.run_sync(validate_structure, result, row.mode)
         # 无效区间/层级不保存为可用结构，其他重大识别问题允许保留待修订。
         if not source_update and any(
             issue.code
@@ -411,30 +421,28 @@ class KnowledgeService:
                 "incomplete_version",
                 "标记现行有效前，请确认版本并补全名称、机关、版本说明及有效日期",
             )
-        before = review_state(row)
+        before = document_state(row)
         for field in before:
             setattr(row, field, getattr(data, field))
         row.source_url = validate_source_url(data.source_url)
         await self.invalidate(row)
+        row.status = "PROCESSING"
         row.revision += 1
         row.legal_metadata = result.metadata.model_dump(mode="json")
-        valid_warnings = {issue.id for issue in result.issues if issue.severity == "WARNING"}
-        acknowledgements = sorted(valid_warnings.intersection(data.acknowledged_issues))
-        row.status = ready_status(result, acknowledgements)
-        row.status_message = (
-            "官网信息已同步，等待审核发布" if source_update else "人工修订已保存，等待审核发布"
-        )
-        row.processing_stage = "COMPLETED"
+        row.failed_stage = None
+        row.processing_stage = "VALIDATING"
         await self.repo.save(
             ParseRevision(
                 document_id=row.id,
                 revision=row.revision,
                 result=result.model_dump(mode="json"),
-                review_state=review_state(row),
-                acknowledged_issues=acknowledgements,
+                review_state=document_state(row),
             )
         )
-        segments = await anyio.to_thread.run_sync(split_document, result, row.mode)
+        errors = [issue for issue in result.issues if issue.severity == "ERROR"]
+        segments = (
+            [] if errors else await anyio.to_thread.run_sync(split_document, result, row.mode)
+        )
         await self.repo.replace_segments(
             row.id,
             row.revision,
@@ -455,23 +463,33 @@ class KnowledgeService:
         row.embedded_count = await self.repo.reuse_embeddings(
             row.id, data.expected_revision, row.revision
         )
-        previous_embedding_status = row.embedding_status
-        if source_update and previous_embedding_status == "FAILED":
-            row.embedding_status = "FAILED"
-        elif row.embedding_model_id and segments:
-            row.embedding_status = "COMPLETED" if row.embedded_count == len(segments) else "QUEUED"
+        if errors:
+            await self.fail_processing(
+                row,
+                "VALIDATING",
+                "数据校验未通过，请修订后重试",
+                code="validation_failed",
+                issue_codes=[issue.code for issue in errors],
+            )
+        elif not segments:
+            await self.fail_processing(
+                row, "CHUNKING", "文档没有可用正文片段，请重新解析", code="no_segments"
+            )
+        elif not row.embedding_model_id:
+            await self.fail_processing(
+                row, "VECTORIZING", "请选择向量模型后重试向量化", code="embedding_model_required"
+            )
         else:
-            row.embedding_status = "DISABLED"
-        if row.embedding_status == "COMPLETED":
-            row.embedding_message = ""
+            row.status, row.processing_stage = "PROCESSING", "VECTORIZING"
+            row.status_message = "数据校验完成，等待向量化后自动发布"
+            row.embedding_status, row.embedding_message = "QUEUED", ""
         await self.audit(
             base_id,
             "SYNC_SOURCE_METADATA" if source_update else "CORRECT",
             reason,
             row,
             before=before,
-            after=review_state(row),
-            acknowledged_issues=acknowledgements,
+            after=document_state(row),
             previous_revision=data.expected_revision,
         )
         await self.repo.session.flush()
@@ -500,96 +518,198 @@ class KnowledgeService:
             verification_note=row.verification_note,
             legal_status=row.legal_status,
             version_confirmed=row.version_confirmed,
-            acknowledged_issues=snapshot.acknowledged_issues,
             reason="同步官网元数据，保留人工修订与版本确认状态",
         )
         return await self.correct(base_id, document_id, data, source_update=source)
 
-    async def publish(self, base_id: UUID, document_id: UUID, data: ReviewInput) -> DocumentView:
-        row = await self.document(base_id, document_id, lock=True)
-        self.require_revision(row, data.expected_revision)
-        reason = check_reason(data.reason)
+    async def validated_result(self, row: KnowledgeDocument) -> ParseResult:
         snapshot = await self.repo.snapshot(row.id, row.revision)
         if snapshot is None:
             raise AppError("parse_required", "文档尚未完成解析")
         result = ParseResult.model_validate(snapshot.result)
-        issues = validate_structure(result, row.mode)
+        issues = await anyio.to_thread.run_sync(validate_structure, result, row.mode)
+        if any(issue.severity == "ERROR" for issue in issues):
+            raise AppError("validation_failed", "数据校验未通过，请修订或重新解析后重试")
+        return result
+
+    async def fail_processing(
+        self, row: KnowledgeDocument, stage: str, message: str, *, code: str, **details: object
+    ) -> None:
+        await self.invalidate(row)
+        row.status, row.status_message = "FAILED", message
+        row.failed_stage, row.processing_stage = stage, "FAILED"
+        row.processing_token, row.lease_until = None, None
+        row.embedding_status = "FAILED"
+        row.embedding_message = message if stage in {"VECTORIZING", "PUBLISHING"} else ""
+        await self.audit(
+            row.knowledge_base_id,
+            "PROCESS_FAILED",
+            message,
+            row,
+            stage=stage,
+            code=code,
+            **details,
+        )
+
+    async def auto_publish(
+        self,
+        row: KnowledgeDocument,
+        reason: str = "向量化完成，系统自动发布",
+        *,
+        automatic: bool = True,
+    ) -> None:
+        # 调用方持有知识库和文档行锁；索引、发布状态和记录在同一事务提交。
+        if row.status == "PUBLISHED":
+            return
+        await self.validated_result(row)
         if (
-            ready_status(result.model_copy(update={"issues": issues}), snapshot.acknowledged_issues)
-            != "READY"
+            not row.embedding_model_id
+            or row.embedding_status != "COMPLETED"
+            or not row.embedding_fingerprint
+            or not row.embedding_dimensions
         ):
-            raise AppError("review_required", "请先修正结构错误并逐项确认校验提示")
-        if not row.chunk_count:
-            raise AppError("no_segments", "文档没有可发布的正文片段")
-        if row.mode == "LEGAL" and (
-            not row.version_confirmed
-            or not result.metadata.title.strip()
-            or not result.metadata.authority.strip()
-            or not result.metadata.version_label.strip()
+            raise AppError("vectors_incomplete", "请完成向量化后发布")
+        provider = await self.embedding_provider(row.embedding_model_id)
+        if provider.fingerprint != row.embedding_fingerprint:
+            raise AppError("embedding_changed", "向量模型配置已变更，请重新发起向量化")
+        total, embedded, incompatible = await self.repo.segment_readiness(row)
+        if (
+            not total
+            or total != row.chunk_count
+            or total != row.chunk_total
+            or total != embedded
+            or incompatible
         ):
-            raise AppError(
-                "version_required", "发布法律文件前，请补全名称、公布机关、版本说明并确认版本"
-            )
-        if row.embedding_model_id and row.embedding_status != "COMPLETED":
-            raise AppError("vectors_incomplete", "已启用向量化，请完成向量化后发布")
+            raise AppError("vectors_incomplete", "正文片段或向量不完整，请重试向量化")
+        row.processing_stage = "PUBLISHING"
+        row.embedded_count = embedded
         await self.repo.publish(row)
         row.status, row.published_at = "PUBLISHED", datetime.now(UTC)
-        row.status_message, row.updated_at = "已人工审核发布", datetime.now(UTC)
+        row.status_message = (
+            "已自动发布，可全文、法条及向量检索" if automatic else "已恢复发布，可检索"
+        )
+        row.updated_at = datetime.now(UTC)
         await self.repo.session.flush()
         while await self.index_lexical(row.id):
             pass
-        await self.audit(base_id, "PUBLISH", reason, row, review_state=review_state(row))
-        await self.repo.session.flush()
-        return document_view(row)
+        await self.repo.record_publication(row)
+        row.processing_stage, row.failed_stage = "COMPLETED", None
+        await self.audit(
+            row.knowledge_base_id,
+            "PUBLISH",
+            reason,
+            row,
+            actor="system" if automatic else "single-workspace",
+            automatic=automatic,
+            document_state=document_state(row),
+            embedding_model_id=str(row.embedding_model_id),
+        )
 
-    async def withdraw(self, base_id: UUID, document_id: UUID, data: ReviewInput) -> DocumentView:
+    async def publish(
+        self, base_id: UUID, document_id: UUID, data: DocumentActionInput
+    ) -> DocumentView:
         row = await self.document(base_id, document_id, lock=True)
         self.require_revision(row, data.expected_revision)
+        if row.status == "PUBLISHED":
+            return document_view(row)
+        if row.status != "WITHDRAWN":
+            raise AppError(
+                "auto_publish_pending", "文档将在处理成功后自动发布，失败时请先重试", 409
+            )
+        await self.auto_publish(row, check_reason(data.reason), automatic=False)
+        return document_view(row)
+
+    async def withdraw(
+        self, base_id: UUID, document_id: UUID, data: DocumentActionInput
+    ) -> DocumentView:
+        row = await self.document(base_id, document_id, lock=True)
+        self.require_revision(row, data.expected_revision)
+        if row.status == "WITHDRAWN":
+            return document_view(row)
+        if row.status != "PUBLISHED":
+            raise AppError("publish_required", "文档尚未发布，无需撤回", 409)
         await self.invalidate(row)
-        row.status, row.status_message = "NEEDS_REVIEW", "已撤回发布，等待重新审核"
+        row.status, row.status_message = "WITHDRAWN", "已撤回发布，可重新处理后自动发布"
         await self.audit(base_id, "WITHDRAW", check_reason(data.reason), row)
         return document_view(row)
 
-    async def reparse(self, base_id: UUID, document_id: UUID, data: ReviewInput) -> DocumentView:
+    async def require_public_processing_slot(
+        self, base_id: UUID, document_id: UUID, *, from_public_task: bool
+    ) -> None:
+        if from_public_task:
+            return
+        row = await self.document(base_id, document_id)
+        if row.public_law_id:
+            public_laws = PublicLawRepository(self.repo.session)
+            await public_laws.admission_lock()
+            if await public_laws.active_task():
+                raise AppError("vector_task_active", "已有公开法规向量化任务，请停止后再操作", 409)
+
+    async def reparse(
+        self,
+        base_id: UUID,
+        document_id: UUID,
+        data: DocumentActionInput,
+        *,
+        from_public_task: bool = False,
+    ) -> DocumentView:
+        await self.require_public_processing_slot(
+            base_id, document_id, from_public_task=from_public_task
+        )
         row = await self.document(base_id, document_id, lock=True)
-        # 解析失败的 revision=0 同样允许重试。
-        if (
-            row.revision != data.expected_revision
-            or row.processing_token
-            or row.status in {"QUEUED", "PROCESSING"}
-        ):
-            raise AppError("processing_conflict", "文档已更新或正在处理中，请刷新后再操作", 409)
+        self.require_revision(row, data.expected_revision)
         await self.invalidate(row)
         row.status, row.processing_stage, row.status_message = "QUEUED", "QUEUED", "等待重新解析"
-        row.version_confirmed, row.legal_status = False, "UNKNOWN"
+        row.failed_stage = None
         row.embedding_status = "QUEUED" if row.embedding_model_id else "DISABLED"
+        row.embedding_message = ""
         row.embedded_count, row.chunk_count, row.chunk_total = 0, 0, 0
         await self.audit(base_id, "REPARSE", check_reason(data.reason), row)
         return document_view(row)
 
     async def vectorize(
-        self, base_id: UUID, document_id: UUID, data: VectorizeInput
+        self,
+        base_id: UUID,
+        document_id: UUID,
+        data: VectorizeInput,
+        *,
+        from_public_task: bool = False,
     ) -> DocumentView:
+        await self.require_public_processing_slot(
+            base_id, document_id, from_public_task=from_public_task
+        )
         row = await self.document(base_id, document_id, lock=True)
+        if row.revision != data.expected_revision:
+            raise AppError("revision_conflict", "文档已更新，请刷新后再操作", 409)
+        if row.processing_stage == "VECTORIZING" and row.embedding_status in {
+            "QUEUED",
+            "PROCESSING",
+        }:
+            if row.embedding_model_id == data.model_id:
+                return document_view(row)
         self.require_revision(row, data.expected_revision)
-        if not row.chunk_count:
-            raise AppError("no_segments", "请先完成文档解析和切分")
+        await self.validated_result(row)
+        if not row.chunk_count or row.chunk_count != row.chunk_total:
+            raise AppError("no_segments", "请先完成文档解析、校验和切分")
         provider = await self.embedding_provider(data.model_id)
+        same_model = (
+            row.embedding_fingerprint == provider.fingerprint
+            and row.embedding_model_id == data.model_id
+        )
+        if same_model and row.status == "PUBLISHED" and row.embedding_status == "COMPLETED":
+            return document_view(row)
         await self.invalidate(row)
-        row.status = "NEEDS_REVIEW"
-        # 模型不变且已有部分结果时断点续传；配置改变则全部重算。
-        if (
-            row.embedding_fingerprint != provider.fingerprint
-            or row.embedding_model_id != data.model_id
-        ):
+        if not same_model:
             await self.repo.reset_embeddings(row)
             row.embedded_count, row.embedding_dimensions = 0, None
         row.embedding_model_id, row.embedding_fingerprint = data.model_id, provider.fingerprint
+        row.status, row.status_message = "PROCESSING", "等待向量化，完成后自动发布"
         row.embedding_status, row.embedding_message, row.processing_stage = (
             "QUEUED",
             "",
             "VECTORIZING",
         )
+        row.failed_stage = None
         await self.audit(
             base_id, "VECTORIZE", check_reason(data.reason), row, model_id=str(data.model_id)
         )

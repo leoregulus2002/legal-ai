@@ -68,6 +68,7 @@ class KnowledgeDocument(Base):
     processing_token: Mapped[UUID | None]
     lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     processing_stage: Mapped[str] = mapped_column(String(30), default="QUEUED")
+    failed_stage: Mapped[str | None] = mapped_column(String(30))
     chunk_count: Mapped[int] = mapped_column(default=0)
     chunk_total: Mapped[int] = mapped_column(default=0)
     embedded_count: Mapped[int] = mapped_column(default=0)
@@ -109,6 +110,21 @@ class KnowledgeAudit(Base):
     revision: Mapped[int | None]
     details: Mapped[dict[str, object]] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class KnowledgePublication(Base):
+    __tablename__ = "knowledge_publications"
+    __table_args__ = (UniqueConstraint("document_id", "revision"),)
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    document_id: Mapped[UUID] = mapped_column(ForeignKey("knowledge_documents.id"), index=True)
+    revision: Mapped[int]
+    published_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    embedding_model_id: Mapped[UUID | None] = mapped_column(ForeignKey("ai_models.id"))
+    embedding_fingerprint: Mapped[str | None] = mapped_column(String(64))
+    embedding_dimensions: Mapped[int | None]
 
 
 class KnowledgeChunk(Base):

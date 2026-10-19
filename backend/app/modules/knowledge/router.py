@@ -10,6 +10,7 @@ from app.modules.knowledge.schemas import (
     AuditView,
     ComparisonView,
     CorrectionInput,
+    DocumentActionInput,
     DocumentDetail,
     DocumentPage,
     DocumentStatus,
@@ -18,7 +19,6 @@ from app.modules.knowledge.schemas import (
     KnowledgeInput,
     KnowledgePage,
     KnowledgeView,
-    ReviewInput,
     SearchPage,
     SegmentPage,
     VectorizeInput,
@@ -156,14 +156,14 @@ async def correct(
 
 @router.post("/{base_id}/documents/{document_id}/publish", response_model=DocumentView)
 async def publish(
-    base_id: UUID, document_id: UUID, data: ReviewInput, service: Service
+    base_id: UUID, document_id: UUID, data: DocumentActionInput, service: Service
 ) -> DocumentView:
     return await service.publish(base_id, document_id, data)
 
 
 @router.post("/{base_id}/documents/{document_id}/withdraw", response_model=DocumentView)
 async def withdraw(
-    base_id: UUID, document_id: UUID, data: ReviewInput, service: Service
+    base_id: UUID, document_id: UUID, data: DocumentActionInput, service: Service
 ) -> DocumentView:
     return await service.withdraw(base_id, document_id, data)
 
@@ -172,7 +172,7 @@ async def withdraw(
     "/{base_id}/documents/{document_id}/reparse", response_model=DocumentView, status_code=202
 )
 async def reparse(
-    base_id: UUID, document_id: UUID, data: ReviewInput, service: Service
+    base_id: UUID, document_id: UUID, data: DocumentActionInput, service: Service
 ) -> DocumentView:
     return await service.reparse(base_id, document_id, data)
 

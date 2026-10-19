@@ -14,6 +14,7 @@ from app.core.redis import RedisClient
 from app.modules.consultation.memory import MemoryStore
 from app.modules.consultation.service import ConsultationService
 from app.modules.knowledge.worker import KnowledgeWorker
+from app.modules.public_laws.worker import PublicLawVectorWorker
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -38,6 +39,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 asyncio.create_task(knowledge_worker.run(kind)) for kind in ("PARSE", "EMBED")
             ]
             knowledge_tasks.append(asyncio.create_task(knowledge_worker.maintain_lexical_index()))
+            knowledge_tasks.append(
+                asyncio.create_task(PublicLawVectorWorker(database.sessions, config).run())
+            )
 
             async def stop_knowledge() -> None:
                 for task in knowledge_tasks:

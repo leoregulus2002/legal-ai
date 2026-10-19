@@ -227,7 +227,7 @@ onUnmounted(() => {
       </div>
     </form>
     <p class="reg-scope-note">
-      检索范围为内部知识库已审核发布的法律资料；效力状态与来源核验以资料记录为准。
+      检索范围为内部知识库已发布的法律资料；效力状态与来源核验以资料记录为准。
     </p>
     <div class="reg-search-layout">
       <aside class="reg-filters" :class="{ 'is-open': filtersOpen }">
@@ -356,7 +356,7 @@ onUnmounted(() => {
               unavailable
                 ? '暂无可显示的结果'
                 : options?.document_count === 0
-                  ? '尚无已审核发布的法规资料'
+                  ? '尚无已发布的法规资料'
                   : '没有找到符合条件的法规资料'
             "
           >

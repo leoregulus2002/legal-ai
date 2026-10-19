@@ -47,6 +47,33 @@ export interface PublicLawImportResult {
   action: 'IMPORTED' | 'RETRIED' | 'EXISTING'
 }
 
+export interface VectorTaskItem {
+  id: string
+  law_id: string
+  title: string
+  status: 'PENDING' | 'PROCESSING' | 'COMPLETED' | 'SKIPPED' | 'FAILED' | 'STOPPED'
+  document_id: string | null
+  error_message: string | null
+}
+
+export interface VectorTask {
+  id: string
+  status: 'RUNNING' | 'STOPPING' | 'STOPPED' | 'COMPLETED' | 'FAILED'
+  knowledge_base_id: string
+  total: number | null
+  discovered: number
+  completed: number
+  skipped: number
+  failed: number
+  current: VectorTaskItem | null
+  stage: string | null
+  embedded_count: number
+  chunk_count: number
+  recent: VectorTaskItem[]
+  created_at: string
+  finished_at: string | null
+}
+
 export interface PublicLaw {
   id: string
   title: string
