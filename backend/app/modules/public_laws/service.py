@@ -55,6 +55,7 @@ async def official_request(
     *,
     params: dict[str, str] | None = None,
 ) -> dict[str, object]:
+    response: httpx.Response | None = None
     try:
         async with httpx.AsyncClient(
             base_url=OFFICIAL_ORIGIN,
@@ -65,15 +66,19 @@ async def official_request(
             response = await client.request(method, path, json=payload, params=params)
             response.raise_for_status()
             data = response.json()
-    except httpx.TimeoutException as exc:
-        raise AppError("public_law_timeout", "公开法律库响应超时，请稍后重试", 504) from exc
     except (httpx.HTTPError, ValueError) as exc:
         logger.warning(
-            "公开法律库请求失败 path=%s type=%s status=%s",
+            "公开法律库请求失败 path=%s type=%s status=%s content_type=%s bytes=%s",
             path,
             type(exc).__name__,
-            exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None,
+            response.status_code if response is not None else None,
+            response.headers.get("content-type", "").split(";", 1)[0][:80]
+            if response is not None
+            else None,
+            len(response.content) if response is not None else None,
         )
+        if isinstance(exc, httpx.TimeoutException):
+            raise AppError("public_law_timeout", "公开法律库响应超时，请稍后重试", 504) from exc
         raise AppError("public_law_unavailable", "公开法律库暂时不可用，请稍后重试", 502) from exc
     if not isinstance(data, dict) or data.get("code") != 200:
         logger.warning(

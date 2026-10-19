@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -17,6 +18,7 @@ from app.modules.public_laws.schemas import PublicLawImportInput, PublicLawSearc
 from app.modules.public_laws.task_service import PublicLawTaskService
 
 logger = logging.getLogger(__name__)
+UPSTREAM_ERRORS = {"public_law_timeout", "public_law_unavailable", "public_law_download_failed"}
 
 
 class PublicLawVectorWorker:
@@ -28,6 +30,23 @@ class PublicLawVectorWorker:
         return PublicLawRepository(session), KnowledgeService(
             KnowledgeRepository(session), self.settings
         )
+
+    async def retry_upstream[T](self, operation: Callable[[], Awaitable[T]]) -> T:
+        for attempt in range(3):
+            try:
+                return await operation()
+            except AppError as exc:
+                if exc.code not in UPSTREAM_ERRORS or attempt == 2:
+                    raise
+                delay = 2 ** (attempt + 1)
+                logger.warning(
+                    "公开法律库暂时异常，延迟重试 code=%s attempt=%s delay=%s",
+                    exc.code,
+                    attempt + 1,
+                    delay,
+                )
+                await asyncio.sleep(delay)
+        raise RuntimeError("Upstream retry attempts exhausted")
 
     async def tick(self) -> None:
         jobs: dict[UUID, asyncio.Task[None]] = {}
@@ -91,7 +110,7 @@ class PublicLawVectorWorker:
 
     async def scan_page(self, task_id: UUID, query: PublicLawSearch) -> None:
         # 不在任务行上持锁进行网络请求，停止请求可立即落库。
-        page = await official.search(query)
+        page = await self.retry_upstream(lambda: official.search(query))
         if not page.items and page.has_more:
             raise official.invalid_response("empty_source_page")
         async with self.sessions.begin() as session:
@@ -144,7 +163,9 @@ class PublicLawVectorWorker:
                     return
                 item.status = "PROCESSING"
         if document_id is None:
-            try:
+
+            async def import_document() -> None:
+                # 每次重试重新创建事务，失败的导入不会遗留部分写入。
                 async with self.sessions.begin() as session:
                     repo, knowledge = self.services(session)
                     task = await repo.task(task_id)
@@ -162,6 +183,14 @@ class PublicLawVectorWorker:
                     item = await repo.item(item_id)
                     if item:
                         item.document_id = result.state.document_id
+
+            try:
+                await self.retry_upstream(import_document)
+            except AppError as exc:
+                if exc.code in UPSTREAM_ERRORS:
+                    # 外部服务持续异常时中断协调器，避免后续法规逐条失败。
+                    raise
+                await self.item_failed(item_id, exc)
             except Exception as exc:
                 await self.item_failed(item_id, exc)
             return

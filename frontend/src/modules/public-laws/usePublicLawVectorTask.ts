@@ -1,6 +1,5 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useMessage } from 'naive-ui'
-import { ApiError } from '../../api/client'
 import { useErrorMessage } from '../../composables/useErrorMessage'
 import { publicLawApi } from './api'
 import type { VectorTask } from './types'
@@ -14,7 +13,6 @@ export function usePublicLawVectorTask(onChanged: () => void) {
   const active = computed(() =>
     Boolean(task.value && ['RUNNING', 'STOPPING'].includes(task.value.status)),
   )
-  const shownFailures = new Set<string>()
   let alive = true
   let refreshing = false
   let failures = 0
@@ -25,21 +23,16 @@ export function usePublicLawVectorTask(onChanged: () => void) {
     sequence++
     clearTimeout(timer)
     const previous = task.value
-    const firstSnapshot = previous?.id !== value.id
-    if (firstSnapshot) shownFailures.clear()
     task.value = value
     failures = 0
-    for (const item of value.recent) {
-      if (item.error_message && !shownFailures.has(item.id)) {
-        shownFailures.add(item.id)
-        // 首次载入只记录历史失败；之后轮询新增的失败才自动提示。
-        if (!firstSnapshot) showError(new ApiError(item.error_message, 'http'))
-      }
-    }
+    // 单条失败保留在处理记录中；自动提示只通知任务状态变化，避免轮询持续弹错。
     if (previous?.id === value.id && previous.status !== value.status) {
       if (value.status === 'STOPPED') message.info('任务已停止，已完成的向量已保留')
-      if (value.status === 'COMPLETED') message.success('法规处理结束')
-      if (value.status === 'FAILED') message.error('任务已中断，请检查知识库和向量模型配置后重试')
+      if (value.status === 'COMPLETED') {
+        if (value.failed) message.warning('法规处理结束，部分法规未完成，可在处理记录中查看原因')
+        else message.success('法规处理结束')
+      }
+      if (value.status === 'FAILED') message.error('任务已中断，请在处理记录中查看原因后重试')
       onChanged()
     } else if (previous?.completed !== value.completed) onChanged()
     if (active.value)
