@@ -109,7 +109,11 @@ def validate_structure(result: ParseResult, mode: str) -> list[ParseIssue]:
         if right.start < left.end:
             add("overlapping_articles", "条文区间重叠", right, error=True)
     if not articles:
-        add("no_articles", "没有可靠识别出法律条文，请人工标注边界或改用普通文档导入", error=True)
+        # 决议、批复等法律文件可能没有编号条文，分片器支持直接按正文切分。
+        add(
+            "no_articles",
+            "未识别到编号条文，将按正文生成检索片段，请核对原文是否完整",
+        )
     if re.search(r"(?m)^\s*目\s*录\s*$", result.text):
         add("contains_toc", "文档含目录，请检查目录条目是否误识别为正文")
     return issues
