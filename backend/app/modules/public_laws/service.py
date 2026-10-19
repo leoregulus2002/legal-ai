@@ -15,6 +15,7 @@ from app.common.exceptions import AppError
 from app.core.logging import redact_log_text
 from app.modules.knowledge.metadata import CATEGORY_VALUES
 from app.modules.knowledge.schemas import LegalMetadata, LegalStatus, SourceMetadata
+from app.modules.public_laws.diagnostics import EVIDENCE_BODY_LIMIT, preserve_evidence
 from app.modules.public_laws.schemas import (
     DownloadLink,
     DownloadRequest,
@@ -50,6 +51,22 @@ def text(value: object) -> str:
     return "".join(parser.parts).strip()
 
 
+def log_excerpt(value: str, size: int) -> str:
+    return redact_log_text(value).encode("utf-8")[:size].decode("utf-8", errors="ignore")
+
+
+def diagnostic_headers(headers: httpx.Headers) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for name, value in list(headers.multi_items())[:32]:
+        if re.search(
+            r"authorization|cookie|token|secret|api[-_]?key|signature|credential", name, re.I
+        ):
+            values[name] = "[REDACTED]"
+        else:
+            values[name] = log_excerpt(value, 256)
+    return values
+
+
 def response_diagnostics(
     response: httpx.Response | None, body: bytes | None = None, *, body_complete: bool = True
 ) -> dict[str, object]:
@@ -58,26 +75,59 @@ def response_diagnostics(
     details: dict[str, object] = {
         "host": response.url.host,
         "path": response.url.path,
+        "request_method": response.request.method,
+        "request_url": redact_log_text(str(response.request.url)),
+        "request_headers": diagnostic_headers(response.request.headers),
+        "response_headers": diagnostic_headers(response.headers),
+        "response_header_count": len(response.headers.multi_items()),
+        "request_header_count": len(response.request.headers.multi_items()),
+        "headers_truncated": (
+            len(response.headers.multi_items()) > 32
+            or len(response.request.headers.multi_items()) > 32
+        ),
+        "http_version": response.http_version,
         "status": response.status_code,
         "content_type": response.headers.get("content-type", ""),
+        "content_encoding": response.headers.get("content-encoding"),
+        "charset_encoding": response.charset_encoding,
+        "text_encoding": response.encoding,
         "content_length": response.headers.get("content-length"),
         "server": response.headers.get("server"),
         "upstream_request_id": response.headers.get("x-request-id")
         or response.headers.get("x-amz-request-id"),
         "retry_after": response.headers.get("retry-after"),
         "location": redact_log_text(response.headers.get("location", "")),
+        "set_cookie_names": [
+            value.partition("=")[0].strip()[:100]
+            for value in response.headers.get_list("set-cookie")[:16]
+        ],
     }
     if body is None:
         return details
     details["captured_bytes"] = len(body)
+    details["body_prefix_hex"] = body[:16].hex()
+    signatures = (
+        (b"\x1f\x8b", "gzip"),
+        (b"PK\x03\x04", "zip"),
+        (b"\xff\xfe", "utf16_le_bom"),
+        (b"\xfe\xff", "utf16_be_bom"),
+        (b"\xef\xbb\xbf", "utf8_bom"),
+    )
+    details["body_signature"] = next(
+        (name for prefix, name in signatures if body.startswith(prefix)), "unrecognized"
+    )
     details["body_sha256" if body_complete else "body_excerpt_sha256"] = hashlib.sha256(
         body
     ).hexdigest()
-    # 只保留可见文字；不把 HTML 脚本、隐藏字段、Cookie 或原件内容写入日志。
+    # 同时保留脱敏原文和可见文字；完整原文另行加密保存，不再因过滤脚本丢失证据。
     try:
         value = body[: 64 * 1024].decode(response.encoding or "utf-8", errors="replace")
     except LookupError:
         value = body[: 64 * 1024].decode("utf-8", errors="replace")
+    details["decode_replacement_count"] = value.count("\ufffd")
+    details["decoded_nul_count"] = value.count("\x00")
+    details["inspected_body_bytes"] = min(len(body), 64 * 1024)
+    details["raw_tail_excerpt_source"] = "end_of_inspected_prefix"
     is_html = "html" in response.headers.get("content-type", "").lower() or bool(
         re.search(r"<(?:!doctype\s+html|html|head|body|script|title)\b", value, flags=re.I)
     )
@@ -88,6 +138,19 @@ def response_diagnostics(
         details["body_omitted"] = "non_text_response"
         details["body_truncated"] = not body_complete
         return details
+    raw_redacted = re.sub(
+        r"(?is)(<input\b[^>]*?\bvalue\s*=\s*)([\"'])(.*?)\2",
+        r"\1\2[REDACTED]\2",
+        redact_log_text(value),
+    )
+    # 过长的混淆字面量只保留代码形状；加密证据中仍保存原始字节。
+    raw_redacted = re.sub(
+        r"([\"'])[^\"'\r\n]{160,}\1", r"\1[LONG_LITERAL_IN_ENCRYPTED_EVIDENCE]\1", raw_redacted
+    )
+    details["raw_excerpt"] = log_excerpt(raw_redacted, 4096)
+    details["raw_tail_excerpt"] = log_excerpt(raw_redacted[-2048:], 2048)
+    details["raw_excerpt_truncated"] = len(raw_redacted.encode("utf-8")) > 4096
+    details["first_non_whitespace_character"] = value.lstrip()[:1]
     if is_html:
         title = re.search(r"<title\b[^>]*>(.*?)</title\s*>", value, flags=re.I | re.S)
         details["page_title"] = redact_log_text(text(title.group(1)))[:300] if title else None
@@ -107,6 +170,12 @@ def response_diagnostics(
             "$_ts",
             "access denied",
             'id="app"',
+            "document.cookie",
+            "window.location",
+            "location.href",
+            "string.fromcharcode",
+            "eval(",
+            "atob(",
         )
         details["page_markers"] = [marker for marker in markers if marker in value.lower()]
         scripts = re.findall(r"<script\b[^>]*\bsrc=[\"']([^\"']+)", value, flags=re.I)
@@ -117,6 +186,9 @@ def response_diagnostics(
             except ValueError:
                 script_paths.append("[invalid script URL]")
         details["script_paths"] = script_paths
+        script_count = len(re.findall(r"<script\b", value, flags=re.I))
+        details["script_count"] = script_count
+        details["inline_script_count"] = max(0, script_count - len(scripts))
         value = re.sub(r"<!--.*?-->", " ", value, flags=re.S)
         value = re.sub(
             r"<(script|style|noscript)\b[^>]*>.*?(?:</\1\s*>|$)",
@@ -126,10 +198,30 @@ def response_diagnostics(
         )
         value = text(value)
     value = redact_log_text(" ".join(value.split()))
-    details["body_excerpt"] = value[:ERROR_BODY_LIMIT]
+    details["body_excerpt"] = log_excerpt(value, ERROR_BODY_LIMIT)
+    details["visible_text_empty"] = not bool(value)
+    if is_html:
+        details["page_kind"] = (
+            "script_only_html" if not value and details["script_count"] else "html"
+        )
     details["body_truncated"] = (
-        not body_complete or len(body) > 64 * 1024 or len(value) > ERROR_BODY_LIMIT
+        not body_complete or len(body) > 64 * 1024 or len(value.encode("utf-8")) > ERROR_BODY_LIMIT
     )
+    return details
+
+
+async def failure_diagnostics(
+    response: httpx.Response | None, body: bytes | None = None, *, body_complete: bool = True
+) -> dict[str, object]:
+    try:
+        details = response_diagnostics(response, body, body_complete=body_complete)
+    except Exception as exc:
+        logger.warning("公开法律库响应诊断字段提取失败 type=%s", type(exc).__name__, exc_info=exc)
+        details = {
+            "status": response.status_code if response is not None else None,
+            "diagnostic_error": type(exc).__name__,
+        }
+    details.update(await preserve_evidence(body, details, body_complete=body_complete))
     return details
 
 
@@ -161,23 +253,26 @@ async def official_request(
             response.raise_for_status()
             data = response.json()
     except (httpx.HTTPError, ValueError) as exc:
+        duration_ms = (perf_counter() - started) * 1000
+        diagnostics = await failure_diagnostics(
+            response, response.content if response is not None else None
+        )
         logger.warning(
             "公开法律库请求失败 method=%s path=%s params=%s type=%s duration_ms=%.1f response=%s",
             method,
             path,
             json.dumps(safe_params, ensure_ascii=False),
             type(exc).__name__,
-            (perf_counter() - started) * 1000,
-            json.dumps(
-                response_diagnostics(response, response.content if response is not None else None),
-                ensure_ascii=False,
-            ),
+            duration_ms,
+            json.dumps(diagnostics, ensure_ascii=False),
             exc_info=exc,
         )
         if isinstance(exc, httpx.TimeoutException):
             raise AppError("public_law_timeout", "公开法律库响应超时，请稍后重试", 504) from exc
         raise AppError("public_law_unavailable", "公开法律库暂时不可用，请稍后重试", 502) from exc
     if not isinstance(data, dict) or data.get("code") != 200:
+        duration_ms = (perf_counter() - started) * 1000
+        diagnostics = await failure_diagnostics(response, response.content)
         logger.warning(
             "公开法律库接口返回异常 method=%s path=%s params=%s code=%s "
             "duration_ms=%.1f response=%s",
@@ -187,8 +282,8 @@ async def official_request(
             data.get("code")
             if isinstance(data, dict) and isinstance(data.get("code"), int)
             else None,
-            (perf_counter() - started) * 1000,
-            json.dumps(response_diagnostics(response, response.content), ensure_ascii=False),
+            duration_ms,
+            json.dumps(diagnostics, ensure_ascii=False),
         )
         raise invalid_response("upstream_response")
     return data
@@ -430,8 +525,10 @@ async def download_file(identifier: str, file_format: Literal["docx", "pdf"]) ->
                     try:
                         async with asyncio.timeout(3):
                             async for chunk in response.aiter_bytes():
-                                chunks.extend(chunk[: max(0, ERROR_BODY_LIMIT + 1 - len(chunks))])
-                                if len(chunks) > ERROR_BODY_LIMIT:
+                                chunks.extend(
+                                    chunk[: max(0, EVIDENCE_BODY_LIMIT + 1 - len(chunks))]
+                                )
+                                if len(chunks) > EVIDENCE_BODY_LIMIT:
                                     error_body_complete = False
                                     break
                     except (httpx.HTTPError, TimeoutError) as exc:
@@ -457,6 +554,10 @@ async def download_file(identifier: str, file_format: Literal["docx", "pdf"]) ->
                     raise invalid_response()
                 return bytes(content)
     except (httpx.HTTPError, AppError) as exc:
+        duration_ms = (perf_counter() - started) * 1000
+        diagnostics = await failure_diagnostics(
+            response, error_body, body_complete=error_body_complete
+        )
         logger.warning(
             "公开法律库文件下载失败 law_id=%s format=%s url=%s type=%s "
             "duration_ms=%.1f received_bytes=%s response=%s",
@@ -464,16 +565,9 @@ async def download_file(identifier: str, file_format: Literal["docx", "pdf"]) ->
             file_format,
             redact_log_text(url),
             type(exc).__name__,
-            (perf_counter() - started) * 1000,
+            duration_ms,
             received,
-            json.dumps(
-                response_diagnostics(
-                    response,
-                    error_body,
-                    body_complete=error_body_complete,
-                ),
-                ensure_ascii=False,
-            ),
+            json.dumps(diagnostics, ensure_ascii=False),
             exc_info=exc,
         )
         if isinstance(exc, AppError):

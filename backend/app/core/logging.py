@@ -22,7 +22,7 @@ _secrets = re.compile(
     r"(?i)([\"']?\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|token|secret|"
     r"password|passwd|credential|signature|access[_-]?key[_-]?id|secret[_-]?access[_-]?key)"
     r"[\"']?\s*[:=]\s*)"
-    r"(?:\"[^\"]*\"|'[^']*'|[^\s,;}\]]+)"
+    r"(?:\[REDACTED\]|\"[^\"]*\"|'[^']*'|[^\s,;}\]]+)"
 )
 
 
@@ -45,14 +45,19 @@ def redact_log_text(value: str) -> str:
         value,
     )
     value = re.sub(
-        r"(?im)\b(authorization|proxy-authorization|cookie|set-cookie)\s*[:=][^\r\n]*",
+        r"(?im)\b(authorization|proxy-authorization|cookie|set-cookie)\s*[:=]\s*"
+        r"(?:\[REDACTED\]|\"[^\"\r\n]*\"|'[^'\r\n]*'|[^\r\n]*)",
         r"\1=[REDACTED]",
         value,
     )
     value = re.sub(r"\bsk-[A-Za-z0-9_-]{10,}", "[REDACTED_KEY]", value)
     return re.sub(
-        r"(?im)^.*(?:\[parameters:|DETAIL:|CONTEXT:).*$", "[REDACTED_DATABASE_DETAIL]", value
+        r"(?im)^\s*(?:\[parameters:|DETAIL:|CONTEXT:).*$", "[REDACTED_DATABASE_DETAIL]", value
     )
+
+
+def current_log_context() -> dict[str, str]:
+    return dict(_context.get() or {})
 
 
 @contextmanager
