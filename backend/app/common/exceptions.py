@@ -32,6 +32,16 @@ def error_response(
 def register_exception_handlers(app: FastAPI) -> None:
     @app.exception_handler(AppError)
     async def app_error_handler(request: Request, exc: AppError) -> JSONResponse:
+        if exc.status_code >= 500:
+            logger.error(
+                "业务请求失败 method=%s path=%s status=%s code=%s request_id=%s",
+                request.method,
+                request.url.path,
+                exc.status_code,
+                exc.code,
+                getattr(request.state, "request_id", None),
+                exc_info=exc,
+            )
         return error_response(request, exc.status_code, exc.code, exc.message)
 
     @app.exception_handler(HTTPException)
@@ -60,8 +70,11 @@ def register_exception_handlers(app: FastAPI) -> None:
     @app.exception_handler(Exception)
     async def unexpected_error_handler(request: Request, exc: Exception) -> JSONResponse:
         logger.error(
-            "未处理异常 type=%s request_id=%s",
+            "未处理异常 method=%s path=%s type=%s request_id=%s",
+            request.method,
+            request.url.path,
             type(exc).__name__,
             getattr(request.state, "request_id", None),
+            exc_info=exc,
         )
         return error_response(request, 500, "internal_error", "服务暂时不可用，请稍后重试")

@@ -40,6 +40,7 @@ class Database:
         self.engine: AsyncEngine = create_async_engine(
             settings.database_url.get_secret_value(),
             pool_pre_ping=True,
+            hide_parameters=True,
             connect_args={"connect_timeout": 3},
         )
         self.sessions = async_sessionmaker(self.engine, expire_on_commit=False)

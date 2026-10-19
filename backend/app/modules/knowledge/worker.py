@@ -263,6 +263,20 @@ class KnowledgeWorker:
                 else "处理未完成，原件已保留，请检查文件或配置后重试"
             )
             stage = row.processing_stage
+            logger.warning(
+                "知识库处理失败 knowledge_base_id=%s document_id=%s task=%s stage=%s "
+                "revision=%s embedded_count=%s chunk_count=%s type=%s code=%s",
+                base_id,
+                document_id,
+                task,
+                stage,
+                row.revision,
+                row.embedded_count,
+                row.chunk_count,
+                type(exc).__name__,
+                exc.code if isinstance(exc, AppError) else "unexpected_error",
+                exc_info=exc,
+            )
             if task == "PARSE" and stage in {"EXTRACTING", "STRUCTURING"}:
                 # 原始解析失败也保留独立修订，不覆盖先前成功或失败的快照。
                 result = ParseResult(
@@ -338,11 +352,21 @@ class KnowledgeWorker:
                                 else:
                                     row.embedding_status = "QUEUED"
                                     row.processing_stage = "VECTORIZING"
-                    except Exception:
-                        logger.warning("知识库退出时归还租约失败")
+                    except Exception as exc:
+                        logger.warning(
+                            "知识库退出时归还租约失败 document_id=%s task=%s",
+                            document_id,
+                            task,
+                            exc_info=exc,
+                        )
                 raise
             except Exception as exc:
-                logger.warning("知识库后台处理暂不可用 type=%s", type(exc).__name__)
+                logger.warning(
+                    "知识库后台处理暂不可用 task=%s type=%s",
+                    task_kind,
+                    type(exc).__name__,
+                    exc_info=exc,
+                )
             await asyncio.sleep(1 if job else 3)
 
     async def maintain_lexical_index(self) -> None:
@@ -358,7 +382,7 @@ class KnowledgeWorker:
             except Exception as exc:
                 cause = exc.orig if isinstance(exc, DBAPIError) else None
                 sqlstate = cause.sqlstate if isinstance(cause, PsycopgError) else None
-                # 不输出 SQL、绑定参数或异常原文，避免把资料和凭据带入日志。
+                # 日志格式器过滤数据库异常原文和绑定参数，仅保留堆栈与 SQLSTATE。
                 if isinstance(exc, ProgrammingError):
                     delay = 60
                 if sqlstate in {"42P01", "42703"}:
@@ -368,6 +392,7 @@ class KnowledgeWorker:
                         "并确认服务连接同一数据库",
                         sqlstate,
                         delay,
+                        exc_info=exc,
                     )
                 else:
                     logger.warning(
@@ -375,5 +400,6 @@ class KnowledgeWorker:
                         type(exc).__name__,
                         sqlstate or "unknown",
                         delay,
+                        exc_info=exc,
                     )
             await asyncio.sleep(delay)

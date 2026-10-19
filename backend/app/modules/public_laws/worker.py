@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.common.exceptions import AppError
 from app.core.config import Settings
+from app.core.logging import log_context
 from app.modules.knowledge.repository import KnowledgeRepository
 from app.modules.knowledge.service import KnowledgeService
 from app.modules.knowledge.worker import KnowledgeWorker
@@ -34,7 +35,8 @@ class PublicLawVectorWorker:
     async def retry_upstream[T](self, operation: Callable[[], Awaitable[T]]) -> T:
         for attempt in range(3):
             try:
-                return await operation()
+                with log_context(attempt=str(attempt + 1), max_attempts="3"):
+                    return await operation()
             except AppError as exc:
                 if exc.code not in UPSTREAM_ERRORS or attempt == 2:
                     raise
@@ -108,11 +110,19 @@ class PublicLawVectorWorker:
                                 )
                                 return
                 # 单个协调器始终持有跨进程互斥锁；每条法规使用独立 Session。
-                for item in processing_items:
-                    jobs[item.id] = asyncio.create_task(self.process_item(task_id, item.id))
-                for item in download_items:
-                    downloading.add(item.id)
-                    jobs[item.id] = asyncio.create_task(self.process_item(task_id, item.id))
+                for items, stage in ((processing_items, "PROCESS"), (download_items, "DOWNLOAD")):
+                    for item in items:
+                        if stage == "DOWNLOAD":
+                            downloading.add(item.id)
+                        with log_context(
+                            task_id=str(task_id),
+                            item_id=str(item.id),
+                            law_id=item.law_id,
+                            title=item.title,
+                            document_id=str(item.document_id) if item.document_id else "",
+                            stage=stage,
+                        ):
+                            jobs[item.id] = asyncio.create_task(self.process_item(task_id, item.id))
                 if query is not None:
                     await self.scan_page(task_id, query)
                 if jobs:
@@ -127,7 +137,8 @@ class PublicLawVectorWorker:
 
     async def scan_page(self, task_id: UUID, query: PublicLawSearch) -> None:
         # 不在任务行上持锁进行网络请求，停止请求可立即落库。
-        page = await self.retry_upstream(lambda: official.search(query))
+        with log_context(task_id=str(task_id), stage="SCAN", source_page=str(query.page_num)):
+            page = await self.retry_upstream(lambda: official.search(query))
         if not page.items and page.has_more:
             raise official.invalid_response("empty_source_page")
         async with self.sessions.begin() as session:
@@ -260,12 +271,24 @@ class PublicLawVectorWorker:
             raise
         except Exception as exc:
             logger.warning(
-                "公开法规处理失败 document_id=%s type=%s", document_id, type(exc).__name__
+                "公开法规处理失败 task_id=%s item_id=%s document_id=%s stage=%s type=%s",
+                task_id,
+                item_id,
+                document_id,
+                kind,
+                type(exc).__name__,
+                exc_info=exc,
             )
             await self.knowledge_worker.failed(document_id, base_id, token, kind, exc)
 
     async def item_failed(self, item_id: UUID, exc: Exception) -> None:
-        logger.warning("公开法规导入失败 item_id=%s type=%s", item_id, type(exc).__name__)
+        logger.warning(
+            "公开法规导入失败 item_id=%s type=%s code=%s",
+            item_id,
+            type(exc).__name__,
+            exc.code if isinstance(exc, AppError) else "unexpected_error",
+            exc_info=exc,
+        )
         async with self.sessions.begin() as session:
             repo, _ = self.services(session)
             item = await repo.item(item_id)
@@ -307,6 +330,14 @@ class PublicLawVectorWorker:
             task = await repo.active_task()
             if task is None:
                 return
+            logger.warning(
+                "公开法规任务中断 task_id=%s knowledge_base_id=%s model_id=%s code=%s",
+                task.id,
+                task.knowledge_base_id,
+                task.embedding_model_id,
+                exc.code,
+                exc_info=exc,
+            )
             await self.finish_items(repo, knowledge, task, exc)
             await PublicLawTaskService(repo, knowledge).finish(task.id, "FAILED")
 
@@ -319,12 +350,15 @@ class PublicLawVectorWorker:
                         try:
                             await self.tick()
                         except AppError as exc:
-                            logger.warning("公开法规任务已暂停 code=%s", exc.code)
                             await self.abort(exc)
                         except Exception as exc:
-                            logger.warning("公开法规向量化暂不可用 type=%s", type(exc).__name__)
+                            logger.warning(
+                                "公开法规向量化暂不可用 type=%s", type(exc).__name__, exc_info=exc
+                            )
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                logger.warning("公开法规向量化后台暂不可用 type=%s", type(exc).__name__)
+                logger.warning(
+                    "公开法规向量化后台暂不可用 type=%s", type(exc).__name__, exc_info=exc
+                )
             await asyncio.sleep(1)
