@@ -19,6 +19,9 @@ HEADING = re.compile(
     rf"(?:\s*之\s*(?P<suffix>{NUM}))?|附\s*则|附\s*件(?:\s*{NUM})?[:：]?)"
 )
 ARTICLE_INLINE = re.compile(rf"(?<=[。；;\n\u3000 ])第\s*({NUM})\s*条(?:之\s*({NUM}))?")
+ARTICLE_REFERENCE = re.compile(
+    rf"[ \t\u3000]*(?:第[ \t\u3000]*{NUM}[ \t\u3000]*[款项目]|规定|所称|[的至、，和及])"
+)
 KINDS = {"编": "PART", "章": "CHAPTER", "节": "SECTION", "条": "ARTICLE"}
 LEVEL = {"PART": 1, "CHAPTER": 2, "SECTION": 3, "SUPPLEMENT": 2, "ANNEX": 0, "ARTICLE": 4}
 
@@ -145,6 +148,9 @@ def parse(extracted: Extracted, mode: str) -> ParseResult:
         label = match["label"]
         compact = re.sub(r"\s", "", label)
         kind = KINDS.get(match["unit"] or "", "SUPPLEMENT" if compact == "附则" else "ANNEX")
+        # 段首的“第X条第Y款”等引用属于正文，不建立新的条文节点。
+        if kind == "ARTICLE" and ARTICLE_REFERENCE.match(text, match.end()):
+            continue
         if kind == "CHAPTER":
             supplement = re.match(r"[ \t\u3000]+附\s*则", text[match.end() :])
             if supplement:
@@ -167,10 +173,9 @@ def parse(extracted: Extracted, mode: str) -> ParseResult:
     for match in ARTICLE_INLINE.finditer(text):
         if match.start() in article_starts:
             continue
-        # 行内引用常有“规定/所称/的”等后缀，保守跳过，保留原文交人工检查。
-        tail = text[match.end() : match.end() + 6]
-        if tail.startswith(("规定", "所称", "的", "至", "、", "，", "和", "及")):
+        if ARTICLE_REFERENCE.match(text, match.end()):
             continue
+        tail = text[match.end() : match.end() + 1]
         if not tail or not tail[0].isspace():
             continue
         markers.append(
