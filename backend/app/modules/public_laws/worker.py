@@ -50,11 +50,13 @@ class PublicLawVectorWorker:
 
     async def tick(self) -> None:
         jobs: dict[UUID, asyncio.Task[None]] = {}
+        downloading: set[UUID] = set()
         try:
             while True:
                 for item_id, job in list(jobs.items()):
                     if job.done():
                         del jobs[item_id]
+                        downloading.discard(item_id)
                         job.result()
                 query: PublicLawSearch | None = None
                 async with self.sessions.begin() as session:
@@ -69,7 +71,7 @@ class PublicLawVectorWorker:
                             await self.finish_items(repo, knowledge, task)
                             await PublicLawTaskService(repo, knowledge).finish(task_id, "STOPPED")
                             return
-                        items = []
+                        processing_items, download_items = [], []
                     else:
                         await knowledge.base(task.knowledge_base_id)
                         provider = await knowledge.embedding_provider(task.embedding_model_id)
@@ -77,24 +79,39 @@ class PublicLawVectorWorker:
                             raise AppError(
                                 "embedding_changed", "向量模型配置已变更，请停止后重新发起任务"
                             )
-                        available = task.concurrency - len(jobs)
-                        items = (
-                            await repo.next_items(task_id, limit=available, exclude=list(jobs))
-                            if available > 0
-                            else []
+                        # 下载使用独立的单条通道，不占解析、向量化的并发名额。
+                        available = max(0, task.concurrency - (len(jobs) - len(downloading)))
+                        ready = await repo.next_items(
+                            task_id,
+                            with_document=True,
+                            limit=available + 1,
+                            exclude=list(jobs),
                         )
-                        if not items and available > 0:
+                        processing_items = ready[:available]
+                        download_items = []
+                        # 除正在处理的文档外，最多预取一份，防止原件无限积压。
+                        if not downloading and len(ready) <= available:
+                            download_items = await repo.next_items(
+                                task_id,
+                                with_document=False,
+                                limit=1,
+                                exclude=list(jobs),
+                            )
+                        if not downloading and not download_items and len(ready) <= available:
                             if not task.scan_complete:
                                 query = PublicLawSearch.model_validate(task.query).model_copy(
                                     update={"page_num": task.source_page}
                                 )
-                            elif not jobs:
+                            elif not jobs and not processing_items:
                                 await PublicLawTaskService(repo, knowledge).finish(
                                     task_id, "COMPLETED"
                                 )
                                 return
                 # 单个协调器始终持有跨进程互斥锁；每条法规使用独立 Session。
-                for item in items:
+                for item in processing_items:
+                    jobs[item.id] = asyncio.create_task(self.process_item(task_id, item.id))
+                for item in download_items:
+                    downloading.add(item.id)
                     jobs[item.id] = asyncio.create_task(self.process_item(task_id, item.id))
                 if query is not None:
                     await self.scan_page(task_id, query)

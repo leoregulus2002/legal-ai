@@ -60,12 +60,12 @@ onMounted(() => {
     <NSpin :show="loading">
       <NForm v-if="ready" label-placement="top" class="policy-form" @submit.prevent="save">
         <section class="form-section">
-          <h2>处理并发</h2>
+          <h2>解析与向量化并发</h2>
           <p>
-            并发数表示同时处理的法规数量，范围为 1–10，默认 1。
-            每条法规依次完成导入、解析、分片和向量化，已完成的法规自动跳过。
+            并发数表示同时解析和向量化的法规数量，范围为 1–10，默认 1。
+            官网详情获取与原件下载固定串行执行，可与解析、分片和向量化同时进行，已完成的法规自动跳过。
           </p>
-          <NFormItem label="同时处理的法规数">
+          <NFormItem label="同时解析和向量化的法规数">
             <NInputNumber
               :value="form.concurrency"
               :min="1"

@@ -53,7 +53,7 @@ const active = computed(() => ['RUNNING', 'STOPPING'].includes(props.task.status
     <div class="public-law-vector-heading">
       <div>
         <h2 id="vector-progress-title">{{ labels[task.status] }}</h2>
-        <p>并发上限 {{ task.concurrency }} · 已有向量自动跳过 · 已完成结果持续保留</p>
+        <p>下载并发 1 · 解析与向量化并发 {{ task.concurrency }} · 已有向量自动跳过</p>
       </div>
       <div class="public-law-import-actions">
         <NButton size="small" @click="$emit('refresh')">刷新进度</NButton>
@@ -80,7 +80,7 @@ const active = computed(() => ['RUNNING', 'STOPPING'].includes(props.task.status
       <span>完成 {{ task.completed }}</span
       ><span>跳过 {{ task.skipped }}</span>
       <span>待重试 {{ task.failed }}</span>
-      <span v-if="active">处理中 {{ task.current_items.length }} / {{ task.concurrency }} 条</span>
+      <span v-if="active">处理中 {{ task.current_items.length }} 条</span>
     </div>
     <div v-if="active" aria-live="polite">
       <p v-if="!task.current_items.length" class="public-law-vector-current">

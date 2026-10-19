@@ -87,7 +87,7 @@ async function submit(): Promise<void> {
       props.query ? { query: props.query } : { laws: props.laws },
     )
     if (!alive) return
-    message.success(`向量化任务已开始，最多同时处理 ${task.concurrency} 条法规`)
+    message.success(`任务已开始，下载并发 1，解析与向量化并发 ${task.concurrency}`)
     emit('started', task)
     emit('close')
   } catch (error: unknown) {
@@ -144,7 +144,7 @@ onUnmounted(() => {
         {{
           query ? '处理当前检索条件下的全部法规，不限当前页。' : `处理所选 ${laws.length} 条法规。`
         }}
-        并发数采用系统统一配置，已向量化法规自动跳过。支持随时停止，关闭页面后任务继续运行。
+        下载固定串行，解析与向量化并发数采用系统统一配置，已向量化法规自动跳过。支持随时停止，关闭页面后任务继续运行。
       </p>
       <div class="public-law-import-fields">
         <label
@@ -171,7 +171,9 @@ onUnmounted(() => {
         /></label>
       </div>
       <p class="public-law-import-note">
-        <template v-if="optionsLoaded">当前配置：最多同时处理 {{ concurrency }} 条法规。</template>
+        <template v-if="optionsLoaded">
+          当前配置：下载并发 1，解析与向量化并发 {{ concurrency }}。
+        </template>
         <RouterLink to="/settings/vectorization" @click="emit('close')">调整并发配置</RouterLink>
       </p>
       <p class="public-law-import-note">

@@ -110,7 +110,12 @@ class PublicLawRepository:
             )
 
     async def next_items(
-        self, task_id: UUID, *, limit: int, exclude: Sequence[UUID] = ()
+        self,
+        task_id: UUID,
+        *,
+        with_document: bool,
+        limit: int,
+        exclude: Sequence[UUID] = (),
     ) -> list[PublicLawVectorItem]:
         return list(
             await self.session.scalars(
@@ -119,6 +124,9 @@ class PublicLawRepository:
                     PublicLawVectorItem.task_id == task_id,
                     PublicLawVectorItem.status.in_(["PROCESSING", "PENDING"]),
                     PublicLawVectorItem.id.not_in(exclude),
+                    PublicLawVectorItem.document_id.is_not(None)
+                    if with_document
+                    else PublicLawVectorItem.document_id.is_(None),
                 )
                 .order_by(
                     (PublicLawVectorItem.status == "PROCESSING").desc(),
