@@ -94,6 +94,7 @@ class ConfigService:
 
     async def save_vectorization(self, data: VectorizationSettings) -> VectorizationSettings:
         row = await self.repo.vectorization(lock=True)
+        row.request_mode = data.request_mode
         row.concurrency = data.concurrency
         await self.repo.session.flush()
         return VectorizationSettings.model_validate(row)

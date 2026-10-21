@@ -1,3 +1,5 @@
+import type { VectorizationRequestMode } from '../system-config/types'
+
 export interface FilterNode extends Record<string, unknown> {
   key: string
   label: string
@@ -63,6 +65,7 @@ export interface VectorTask {
   id: string
   status: 'RUNNING' | 'STOPPING' | 'STOPPED' | 'COMPLETED' | 'FAILED'
   knowledge_base_id: string
+  request_mode: VectorizationRequestMode
   concurrency: number
   total: number | null
   discovered: number

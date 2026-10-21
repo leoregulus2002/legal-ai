@@ -76,7 +76,11 @@ class VectorizationConfig(Base):
     __table_args__ = (
         CheckConstraint("id = 1", name="singleton"),
         CheckConstraint("concurrency BETWEEN 1 AND 10", name="concurrency_range"),
+        CheckConstraint("request_mode IN ('serial', 'concurrent')", name="request_mode_values"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     concurrency: Mapped[int] = mapped_column(default=1, server_default="1")
+    request_mode: Mapped[str] = mapped_column(
+        String(20), default="concurrent", server_default="concurrent"
+    )

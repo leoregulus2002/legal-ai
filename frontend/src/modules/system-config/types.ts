@@ -60,7 +60,10 @@ export interface Policy {
 export type PolicyInput = Policy
 export type PolicyView = Policy
 
+export type VectorizationRequestMode = 'serial' | 'concurrent'
+
 export interface VectorizationSettings {
+  request_mode: VectorizationRequestMode
   concurrency: number
 }
 

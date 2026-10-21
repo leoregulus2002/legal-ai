@@ -53,7 +53,12 @@ const active = computed(() => ['RUNNING', 'STOPPING'].includes(props.task.status
     <div class="public-law-vector-heading">
       <div>
         <h2 id="vector-progress-title">{{ labels[task.status] }}</h2>
-        <p>下载并发 1 · 解析与向量化并发 {{ task.concurrency }} · 已有向量自动跳过</p>
+        <p v-if="task.request_mode === 'serial'">
+          线性请求 · 逐条完成下载、解析与向量化 · 已有向量自动跳过
+        </p>
+        <p v-else>
+          并发请求 · 下载并发 1 · 解析与向量化并发 {{ task.concurrency }} · 已有向量自动跳过
+        </p>
       </div>
       <div class="public-law-import-actions">
         <NButton size="small" @click="$emit('refresh')">刷新进度</NButton>

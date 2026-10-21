@@ -81,8 +81,11 @@ class PublicLawVectorWorker:
                             raise AppError(
                                 "embedding_changed", "向量模型配置已变更，请停止后重新发起任务"
                             )
-                        # 下载使用独立的单条通道，不占解析、向量化的并发名额。
-                        available = max(0, task.concurrency - (len(jobs) - len(downloading)))
+                        serial = task.request_mode == "serial"
+                        # 线性模式所有阶段共用一个名额；并发模式保留独立下载通道。
+                        capacity = 1 if serial else task.concurrency
+                        occupied = len(jobs) if serial else len(jobs) - len(downloading)
+                        available = max(0, capacity - occupied)
                         ready = await repo.next_items(
                             task_id,
                             with_document=True,
@@ -91,15 +94,21 @@ class PublicLawVectorWorker:
                         )
                         processing_items = ready[:available]
                         download_items = []
+                        can_fetch = (
+                            not downloading
+                            and len(ready) <= available
+                            and (not serial or (not jobs and not processing_items))
+                        )
                         # 除正在处理的文档外，最多预取一份，防止原件无限积压。
-                        if not downloading and len(ready) <= available:
+                        # 线性模式必须完成当前法规后，才能下载下一份或翻页。
+                        if can_fetch:
                             download_items = await repo.next_items(
                                 task_id,
                                 with_document=False,
                                 limit=1,
                                 exclude=list(jobs),
                             )
-                        if not downloading and not download_items and len(ready) <= available:
+                        if can_fetch and not download_items:
                             if not task.scan_complete:
                                 query = PublicLawSearch.model_validate(task.query).model_copy(
                                     update={"page_num": task.source_page}

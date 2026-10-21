@@ -169,6 +169,7 @@ class VectorTaskView(BaseModel):
     id: UUID
     status: Literal["RUNNING", "STOPPING", "STOPPED", "COMPLETED", "FAILED"]
     knowledge_base_id: UUID
+    request_mode: Literal["serial", "concurrent"]
     concurrency: int
     total: int | None
     discovered: int

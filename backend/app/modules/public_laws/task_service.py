@@ -76,7 +76,8 @@ class PublicLawTaskService:
         task = PublicLawVectorTask(
             knowledge_base_id=data.knowledge_base_id,
             embedding_model_id=data.embedding_model_id,
-            concurrency=configuration.concurrency,
+            request_mode=configuration.request_mode,
+            concurrency=1 if configuration.request_mode == "serial" else configuration.concurrency,
             embedding_fingerprint=provider.fingerprint,
             query=query.model_dump(mode="json") if query else None,
             total=None if query else len({law.id for law in data.laws}),

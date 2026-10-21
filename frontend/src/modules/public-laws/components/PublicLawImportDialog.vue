@@ -4,6 +4,7 @@ import { NButton, NEmpty, NModal, NSelect, NSpin, useMessage } from 'naive-ui'
 import { useErrorMessage } from '../../../composables/useErrorMessage'
 import { knowledgeApi } from '../../knowledge/api'
 import { configApi } from '../../system-config/api'
+import type { VectorizationRequestMode } from '../../system-config/types'
 import { publicLawApi } from '../api'
 import type { PublicLaw, PublicLawQuery, VectorTask } from '../types'
 
@@ -14,6 +15,7 @@ const showError = useErrorMessage()
 const baseId = ref<string | null>(null)
 const modelId = ref<string | null>(null)
 const concurrency = ref(1)
+const requestMode = ref<VectorizationRequestMode>('concurrent')
 const bases = ref<{ label: string; value: string }[]>([])
 const models = ref<{ label: string; value: string }[]>([])
 const loading = ref(false)
@@ -58,6 +60,7 @@ async function loadOptions(): Promise<void> {
     if (!alive || request !== optionsSequence) return
     bases.value = basePage.items.map((base) => ({ label: base.name, value: base.id }))
     concurrency.value = vectorization.concurrency
+    requestMode.value = vectorization.request_mode
     models.value = configurations
       .filter((model) => model.enabled && model.model_type === 'embedding')
       .map((model) => ({ label: model.name, value: model.id }))
@@ -87,7 +90,11 @@ async function submit(): Promise<void> {
       props.query ? { query: props.query } : { laws: props.laws },
     )
     if (!alive) return
-    message.success(`任务已开始，下载并发 1，解析与向量化并发 ${task.concurrency}`)
+    message.success(
+      task.request_mode === 'serial'
+        ? '任务已开始，采用线性请求模式逐条处理'
+        : `任务已开始，采用并发请求模式，解析与向量化并发 ${task.concurrency}`,
+    )
     emit('started', task)
     emit('close')
   } catch (error: unknown) {
@@ -144,7 +151,7 @@ onUnmounted(() => {
         {{
           query ? '处理当前检索条件下的全部法规，不限当前页。' : `处理所选 ${laws.length} 条法规。`
         }}
-        下载固定串行，解析与向量化并发数采用系统统一配置，已向量化法规自动跳过。支持随时停止，关闭页面后任务继续运行。
+        请求模式采用系统统一配置，已向量化法规自动跳过。支持随时停止，关闭页面后任务继续运行。
       </p>
       <div class="public-law-import-fields">
         <label
@@ -172,9 +179,14 @@ onUnmounted(() => {
       </div>
       <p class="public-law-import-note">
         <template v-if="optionsLoaded">
-          当前配置：下载并发 1，解析与向量化并发 {{ concurrency }}。
+          <template v-if="requestMode === 'serial'">
+            当前配置：线性请求，逐条完成下载、解析与向量化。
+          </template>
+          <template v-else>
+            当前配置：并发请求，下载并发 1，解析与向量化并发 {{ concurrency }}。
+          </template>
         </template>
-        <RouterLink to="/settings/vectorization" @click="emit('close')">调整并发配置</RouterLink>
+        <RouterLink to="/settings/vectorization" @click="emit('close')">调整请求模式</RouterLink>
       </p>
       <p class="public-law-import-note">
         <RouterLink to="/knowledge" @click="emit('close')">前往管理或新建知识库</RouterLink>
