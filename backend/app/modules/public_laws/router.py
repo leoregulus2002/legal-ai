@@ -8,6 +8,7 @@ from app.modules.knowledge.repository import KnowledgeRepository
 from app.modules.knowledge.schemas import DocumentDetail
 from app.modules.knowledge.service import KnowledgeService
 from app.modules.public_laws import service
+from app.modules.public_laws.http_client import OfficialLawClient
 from app.modules.public_laws.library_service import PublicLawLibraryService
 from app.modules.public_laws.repository import PublicLawRepository
 from app.modules.public_laws.schemas import (
@@ -32,10 +33,20 @@ LawId = Annotated[str, Path(pattern=r"^[A-Za-z0-9_-]{1,100}$")]
 FileFormat = Annotated[Literal["docx", "pdf"], Query(alias="format")]
 
 
-def get_library(request: Request, session: SessionDependency) -> PublicLawLibraryService:
+def get_official_client(request: Request) -> OfficialLawClient:
+    return request.app.state.official_laws
+
+
+OfficialClient = Annotated[OfficialLawClient, Depends(get_official_client)]
+
+
+def get_library(
+    request: Request, session: SessionDependency, client: OfficialClient
+) -> PublicLawLibraryService:
     return PublicLawLibraryService(
         PublicLawRepository(session),
         KnowledgeService(KnowledgeRepository(session), request.app.state.settings),
+        client,
     )
 
 
@@ -65,8 +76,8 @@ async def stop_task(task_id: UUID, tasks: Tasks) -> VectorTaskView:
 
 
 @router.get("/options", response_model=PublicLawOptions)
-async def get_options() -> PublicLawOptions:
-    return await service.options()
+async def get_options(client: OfficialClient) -> PublicLawOptions:
+    return await service.options(client=client)
 
 
 @router.post("/search", response_model=PublicLawPage)
@@ -94,25 +105,32 @@ async def sync_metadata(
 
 
 @router.post("/downloads", response_model=list[DownloadLink])
-async def downloads(query: DownloadRequest) -> list[DownloadLink]:
-    return await service.downloads(query)
+async def downloads(query: DownloadRequest, client: OfficialClient) -> list[DownloadLink]:
+    return await service.downloads(query, client=client)
 
 
 @router.get("/{identifier}", response_model=PublicLawDetail)
-async def detail(identifier: LawId, decision: bool = False) -> PublicLawDetail:
-    return await service.detail(identifier, decision=decision)
+async def detail(
+    identifier: LawId, client: OfficialClient, decision: bool = False
+) -> PublicLawDetail:
+    return await service.detail(identifier, client=client, decision=decision)
 
 
 @router.get("/{identifier}/preview", response_model=PreviewLink)
 async def preview(
-    identifier: LawId, file_format: FileFormat = "docx", decision: bool = False
+    identifier: LawId,
+    client: OfficialClient,
+    file_format: FileFormat = "docx",
+    decision: bool = False,
 ) -> PreviewLink:
-    return await service.preview(identifier, file_format, decision=decision)
+    return await service.preview(identifier, file_format, client=client, decision=decision)
 
 
 @router.get("/{identifier}/download")
-async def download(identifier: LawId, file_format: FileFormat = "docx") -> Response:
-    content = await service.download_file(identifier, file_format)
+async def download(
+    identifier: LawId, client: OfficialClient, file_format: FileFormat = "docx"
+) -> Response:
+    content = await service.download_file(identifier, file_format, client=client)
     media_type = (
         "application/pdf"
         if file_format == "pdf"

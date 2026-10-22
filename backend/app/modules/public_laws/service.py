@@ -16,6 +16,12 @@ from app.core.logging import redact_log_text
 from app.modules.knowledge.metadata import CATEGORY_VALUES
 from app.modules.knowledge.schemas import LegalMetadata, LegalStatus, SourceMetadata
 from app.modules.public_laws.diagnostics import EVIDENCE_BODY_LIMIT, preserve_evidence
+from app.modules.public_laws.http_client import (
+    FILE_HOST,
+    OFFICIAL_ORIGIN,
+    OfficialLawClient,
+    OfficialLawRedirectError,
+)
 from app.modules.public_laws.schemas import (
     DownloadLink,
     DownloadRequest,
@@ -29,7 +35,6 @@ from app.modules.public_laws.schemas import (
 )
 
 logger = logging.getLogger(__name__)
-OFFICIAL_ORIGIN = "https://flk.npc.gov.cn"
 ERROR_BODY_LIMIT = 8192
 
 
@@ -235,6 +240,7 @@ async def official_request(
     path: str,
     payload: object = None,
     *,
+    client: OfficialLawClient,
     params: dict[str, str] | None = None,
 ) -> dict[str, object]:
     response: httpx.Response | None = None
@@ -243,19 +249,21 @@ async def official_request(
         key: value for key, value in (params or {}).items() if key in {"bbbs", "format", "fileId"}
     }
     try:
-        async with httpx.AsyncClient(
-            base_url=OFFICIAL_ORIGIN,
-            timeout=httpx.Timeout(30, connect=10),
-            follow_redirects=False,
-            headers={"Accept": "application/json", "Referer": OFFICIAL_ORIGIN + "/"},
-        ) as client:
-            response = await client.request(method, path, json=payload, params=params)
-            response.raise_for_status()
-            data = response.json()
-    except (httpx.HTTPError, ValueError) as exc:
+        response = await client.request(method, path, payload, params=params)
+        response.raise_for_status()
+        data = response.json()
+    except (httpx.HTTPError, httpx.InvalidURL, ValueError) as exc:
+        if isinstance(exc, httpx.HTTPStatusError):
+            response = exc.response
         duration_ms = (perf_counter() - started) * 1000
         diagnostics = await failure_diagnostics(
-            response, response.content if response is not None else None
+            response,
+            exc.body
+            if isinstance(exc, OfficialLawRedirectError)
+            else response.content
+            if response is not None
+            else None,
+            body_complete=exc.body_complete if isinstance(exc, OfficialLawRedirectError) else True,
         )
         logger.warning(
             "公开法律库请求失败 method=%s path=%s params=%s type=%s duration_ms=%.1f response=%s",
@@ -299,7 +307,7 @@ def resource_url(value: object, *, preview: bool = False) -> str:
         port = parsed.port
     except ValueError as exc:
         raise invalid_response("resource_url_malformed") from exc
-    allowed_hosts = {"flkoss.obs-bj2.cucloud.cn"}
+    allowed_hosts = {FILE_HOST}
     if preview:
         allowed_hosts.update({"flk.npc.gov.cn", "flkofd.npc.gov.cn"})
     if (
@@ -347,8 +355,8 @@ def filter_nodes(value: object, prefix: str) -> list[FilterNode]:
     return nodes
 
 
-async def options() -> PublicLawOptions:
-    result = await official_request("GET", "/law-search/search/enumData")
+async def options(*, client: OfficialLawClient) -> PublicLawOptions:
+    result = await official_request("GET", "/law-search/search/enumData", client=client)
     data = result.get("data")
     if not isinstance(data, dict):
         raise invalid_response()
@@ -385,11 +393,12 @@ def law_item(value: object) -> PublicLaw:
     )
 
 
-async def search(query: PublicLawSearch) -> PublicLawPage:
+async def search(query: PublicLawSearch, *, client: OfficialLawClient) -> PublicLawPage:
     result = await official_request(
         "POST",
         "/law-search/search/list",
         query.model_dump(mode="json", by_alias=True, exclude={"vectorization", "cursor"}),
+        client=client,
     )
     rows, total = result.get("rows"), result.get("total")
     if not isinstance(rows, list) or type(total) is not int or total < 0:
@@ -407,11 +416,12 @@ async def search(query: PublicLawSearch) -> PublicLawPage:
     )
 
 
-async def downloads(query: DownloadRequest) -> list[DownloadLink]:
+async def downloads(query: DownloadRequest, *, client: OfficialLawClient) -> list[DownloadLink]:
     result = await official_request(
         "POST",
         "/law-search/download/batch",
         [{"bbbs": identifier, "format": "docx"} for identifier in dict.fromkeys(query.ids)],
+        client=client,
     )
     data = result.get("data")
     if not isinstance(data, list) or not data:
@@ -424,11 +434,14 @@ async def downloads(query: DownloadRequest) -> list[DownloadLink]:
     return links
 
 
-async def detail_data(identifier: str, *, decision: bool = False) -> dict[str, object]:
+async def detail_data(
+    identifier: str, *, client: OfficialLawClient, decision: bool = False
+) -> dict[str, object]:
     result = await official_request(
         "GET",
         "/law-search/search/xgwjDetails" if decision else "/law-search/search/flfgDetails",
         params={"bbbs": identifier},
+        client=client,
     )
     data = result.get("data")
     if not isinstance(data, dict) or data.get("bbbs") != identifier:
@@ -452,8 +465,10 @@ def preview_files(data: dict[str, object]) -> dict[Literal["docx", "pdf"], str]:
     return paths
 
 
-async def detail(identifier: str, *, decision: bool = False) -> PublicLawDetail:
-    data = await detail_data(identifier, decision=decision)
+async def detail(
+    identifier: str, *, client: OfficialLawClient, decision: bool = False
+) -> PublicLawDetail:
+    data = await detail_data(identifier, client=client, decision=decision)
     law = law_item(data)
     statuses: dict[int, LegalStatus] = {
         1: "REPEALED",
@@ -488,13 +503,20 @@ async def detail(identifier: str, *, decision: bool = False) -> PublicLawDetail:
 
 
 async def preview(
-    identifier: str, file_format: Literal["docx", "pdf"], *, decision: bool = False
+    identifier: str,
+    file_format: Literal["docx", "pdf"],
+    *,
+    client: OfficialLawClient,
+    decision: bool = False,
 ) -> PreviewLink:
-    files = preview_files(await detail_data(identifier, decision=decision))
+    files = preview_files(await detail_data(identifier, client=client, decision=decision))
     if file_format not in files:
         raise AppError("public_law_preview_missing", "该法规暂无此版本的预览文件", 404)
     result = await official_request(
-        "GET", "/law-search/amazonFile/previewLink", params={"filePath": files[file_format]}
+        "GET",
+        "/law-search/amazonFile/previewLink",
+        params={"filePath": files[file_format]},
+        client=client,
     )
     data = result.get("data")
     return PreviewLink(
@@ -502,11 +524,14 @@ async def preview(
     )
 
 
-async def download_file(identifier: str, file_format: Literal["docx", "pdf"]) -> bytes:
+async def download_file(
+    identifier: str, file_format: Literal["docx", "pdf"], *, client: OfficialLawClient
+) -> bytes:
     result = await official_request(
         "GET",
         "/law-search/download/pc",
         params={"bbbs": identifier, "format": file_format, "fileId": ""},
+        client=client,
     )
     data = result.get("data")
     url = resource_url(data.get("url") if isinstance(data, dict) else None)
@@ -516,44 +541,43 @@ async def download_file(identifier: str, file_format: Literal["docx", "pdf"]) ->
     error_body: bytes | None = None
     error_body_complete = True
     try:
-        async with httpx.AsyncClient(
-            timeout=httpx.Timeout(45, connect=10), follow_redirects=False
-        ) as client:
-            async with client.stream("GET", url) as response:
-                if not response.is_success:
-                    chunks = bytearray()
-                    try:
-                        async with asyncio.timeout(3):
-                            async for chunk in response.aiter_bytes():
-                                chunks.extend(
-                                    chunk[: max(0, EVIDENCE_BODY_LIMIT + 1 - len(chunks))]
-                                )
-                                if len(chunks) > EVIDENCE_BODY_LIMIT:
-                                    error_body_complete = False
-                                    break
-                    except (httpx.HTTPError, TimeoutError) as exc:
-                        error_body_complete = False
-                        # 诊断正文读取失败不覆盖原来的 HTTP 错误。
-                        logger.warning(
-                            "公开法律库下载错误响应读取未完成 law_id=%s "
-                            "status=%s captured_bytes=%s",
-                            identifier,
-                            response.status_code,
-                            len(chunks),
-                            exc_info=exc,
-                        )
-                    error_body = bytes(chunks)
-                response.raise_for_status()
-                content = bytearray()
-                async for chunk in response.aiter_bytes():
-                    content.extend(chunk)
-                    received = len(content)
-                    if len(content) > 50 * 1024 * 1024:
-                        raise AppError("public_law_file_large", "文件较大，暂时无法下载", 502)
-                if not content:
-                    raise invalid_response()
-                return bytes(content)
-    except (httpx.HTTPError, AppError) as exc:
+        async with client.stream("GET", url, download=True) as response:
+            if not response.is_success:
+                chunks = bytearray()
+                try:
+                    async with asyncio.timeout(3):
+                        async for chunk in response.aiter_bytes():
+                            chunks.extend(chunk[: max(0, EVIDENCE_BODY_LIMIT + 1 - len(chunks))])
+                            if len(chunks) > EVIDENCE_BODY_LIMIT:
+                                error_body_complete = False
+                                break
+                except (httpx.HTTPError, TimeoutError) as exc:
+                    error_body_complete = False
+                    # 诊断正文读取失败不覆盖原来的 HTTP 错误。
+                    logger.warning(
+                        "公开法律库下载错误响应读取未完成 law_id=%s status=%s captured_bytes=%s",
+                        identifier,
+                        response.status_code,
+                        len(chunks),
+                        exc_info=exc,
+                    )
+                error_body = bytes(chunks)
+            response.raise_for_status()
+            content = bytearray()
+            async for chunk in response.aiter_bytes():
+                content.extend(chunk)
+                received = len(content)
+                if len(content) > 50 * 1024 * 1024:
+                    raise AppError("public_law_file_large", "文件较大，暂时无法下载", 502)
+            if not content:
+                raise invalid_response()
+            return bytes(content)
+    except (httpx.HTTPError, httpx.InvalidURL, AppError) as exc:
+        if isinstance(exc, httpx.HTTPStatusError):
+            response = exc.response
+        if isinstance(exc, OfficialLawRedirectError):
+            error_body = exc.body
+            error_body_complete = exc.body_complete
         duration_ms = (perf_counter() - started) * 1000
         diagnostics = await failure_diagnostics(
             response, error_body, body_complete=error_body_complete

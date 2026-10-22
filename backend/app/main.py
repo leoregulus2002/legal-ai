@@ -15,6 +15,7 @@ from app.modules.consultation.memory import MemoryStore
 from app.modules.consultation.service import ConsultationService
 from app.modules.document_analysis.worker import AnalysisWorker
 from app.modules.knowledge.worker import KnowledgeWorker
+from app.modules.public_laws.http_client import OfficialLawClient
 from app.modules.public_laws.worker import PublicLawVectorWorker
 
 
@@ -32,6 +33,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             application.state.database = database
             application.state.redis = redis
             await redis.initialize()
+            official_laws = OfficialLawClient(redis.client)
+            stack.push_async_callback(official_laws.close)
+            application.state.official_laws = official_laws
             consultation = ConsultationService(database.sessions, config, MemoryStore(redis.client))
             maintenance = asyncio.create_task(consultation.maintain_attachments())
 
@@ -41,7 +45,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             ]
             knowledge_tasks.append(asyncio.create_task(knowledge_worker.maintain_lexical_index()))
             knowledge_tasks.append(
-                asyncio.create_task(PublicLawVectorWorker(database.sessions, config).run())
+                asyncio.create_task(
+                    PublicLawVectorWorker(database.sessions, config, official_laws).run()
+                )
             )
             knowledge_tasks.append(
                 asyncio.create_task(AnalysisWorker(database.sessions, config).run())

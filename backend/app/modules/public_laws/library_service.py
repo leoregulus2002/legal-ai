@@ -8,6 +8,7 @@ from app.modules.knowledge.models import KnowledgeBase, KnowledgeDocument
 from app.modules.knowledge.schemas import DocumentActionInput, DocumentDetail, VectorizeInput
 from app.modules.knowledge.service import KnowledgeService
 from app.modules.public_laws import service as official
+from app.modules.public_laws.http_client import OfficialLawClient
 from app.modules.public_laws.repository import PublicLawRepository
 from app.modules.public_laws.schemas import (
     PublicLaw,
@@ -50,8 +51,14 @@ def import_state(row: KnowledgeDocument, base: KnowledgeBase) -> PublicLawImport
 
 
 class PublicLawLibraryService:
-    def __init__(self, repository: PublicLawRepository, knowledge: KnowledgeService) -> None:
+    def __init__(
+        self,
+        repository: PublicLawRepository,
+        knowledge: KnowledgeService,
+        client: OfficialLawClient,
+    ) -> None:
         self.repo, self.knowledge = repository, knowledge
+        self.client = client
 
     async def states(self, identifiers: list[str]) -> list[PublicLawImportState]:
         return [import_state(row, base) for row, base in await self.repo.imports(identifiers)]
@@ -69,7 +76,7 @@ class PublicLawLibraryService:
         decision = isinstance(origin, str) and parse_qs(urlsplit(origin).query).get("type") == [
             "decision"
         ]
-        law = await official.detail(identifier, decision=decision)
+        law = await official.detail(identifier, client=self.client, decision=decision)
         return await self.knowledge.sync_source_metadata(
             data.knowledge_base_id, data.document_id, data.expected_revision, law.source_metadata
         )
@@ -88,7 +95,7 @@ class PublicLawLibraryService:
 
     async def search(self, query: PublicLawSearch) -> PublicLawPage:
         if query.vectorization == "all":
-            result = await official.search(query)
+            result = await official.search(query, client=self.client)
             await self.annotate(result.items)
             return result
         source_page, offset = (1, 0)
@@ -105,7 +112,8 @@ class PublicLawLibraryService:
             source = await official.search(
                 query.model_copy(
                     update={"page_num": source_page, "page_size": 50, "search_type": search_type}
-                )
+                ),
+                client=self.client,
             )
             search_type = source.search_type
             next_cursor = None
@@ -152,11 +160,11 @@ class PublicLawLibraryService:
         law = None
         content = None
         if not existing:
-            law = await official.detail(identifier, decision=data.decision)
+            law = await official.detail(identifier, client=self.client, decision=data.decision)
             file_format: Literal["docx", "pdf"] = (
                 "pdf" if law.preview_formats == ["pdf"] else "docx"
             )
-            content = await official.download_file(identifier, file_format)
+            content = await official.download_file(identifier, file_format, client=self.client)
             if len(content) > 25 * 1024 * 1024:
                 raise AppError("document_too_large", "单个文件不能超过 25 MB")
         # 与知识库现有写操作采用相同锁顺序，锁定后再次去重，防止并发重复导入。

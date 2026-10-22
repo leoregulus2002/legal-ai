@@ -13,6 +13,7 @@ from app.modules.knowledge.repository import KnowledgeRepository
 from app.modules.knowledge.service import KnowledgeService
 from app.modules.knowledge.worker import KnowledgeWorker
 from app.modules.public_laws import service as official
+from app.modules.public_laws.http_client import OfficialLawClient, request_interval
 from app.modules.public_laws.library_service import PublicLawLibraryService, import_state
 from app.modules.public_laws.models import PublicLawVectorTask
 from app.modules.public_laws.repository import PublicLawRepository
@@ -24,8 +25,14 @@ UPSTREAM_ERRORS = {"public_law_timeout", "public_law_unavailable", "public_law_d
 
 
 class PublicLawVectorWorker:
-    def __init__(self, sessions: async_sessionmaker[AsyncSession], settings: Settings) -> None:
+    def __init__(
+        self,
+        sessions: async_sessionmaker[AsyncSession],
+        settings: Settings,
+        client: OfficialLawClient,
+    ) -> None:
         self.sessions, self.settings = sessions, settings
+        self.client = client
         self.knowledge_worker = KnowledgeWorker(sessions, settings)
 
     def services(self, session: AsyncSession) -> tuple[PublicLawRepository, KnowledgeService]:
@@ -140,18 +147,22 @@ class PublicLawVectorWorker:
                     for item in items:
                         if stage == "DOWNLOAD":
                             downloading.add(item.id)
-                        with log_context(
-                            task_id=str(task_id),
-                            item_id=str(item.id),
-                            law_id=item.law_id,
-                            title=item.title,
-                            document_id=str(item.document_id) if item.document_id else "",
-                            stage=stage,
-                            download_delay_ms=str(task.download_delay_ms),
+                        with (
+                            request_interval(task.download_delay_ms),
+                            log_context(
+                                task_id=str(task_id),
+                                item_id=str(item.id),
+                                law_id=item.law_id,
+                                title=item.title,
+                                document_id=str(item.document_id) if item.document_id else "",
+                                stage=stage,
+                                download_delay_ms=str(task.download_delay_ms),
+                            ),
                         ):
                             jobs[item.id] = asyncio.create_task(self.process_item(task_id, item.id))
                 if query is not None:
-                    await self.scan_page(task_id, query)
+                    with request_interval(task.download_delay_ms):
+                        await self.scan_page(task_id, query)
                 if jobs:
                     await asyncio.wait(
                         jobs.values(),
@@ -170,7 +181,7 @@ class PublicLawVectorWorker:
     async def scan_page(self, task_id: UUID, query: PublicLawSearch) -> None:
         # 不在任务行上持锁进行网络请求，停止请求可立即落库。
         with log_context(task_id=str(task_id), stage="SCAN", source_page=str(query.page_num)):
-            page = await self.retry_upstream(lambda: official.search(query))
+            page = await self.retry_upstream(lambda: official.search(query, client=self.client))
         if not page.items and page.has_more:
             raise official.invalid_response("empty_source_page")
         async with self.sessions.begin() as session:
@@ -231,7 +242,7 @@ class PublicLawVectorWorker:
                     task = await repo.task(task_id)
                     if task is None or task.status != "RUNNING":
                         return
-                    result = await PublicLawLibraryService(repo, knowledge).import_law(
+                    result = await PublicLawLibraryService(repo, knowledge, self.client).import_law(
                         law_id,
                         PublicLawImportInput(
                             knowledge_base_id=base_id,
