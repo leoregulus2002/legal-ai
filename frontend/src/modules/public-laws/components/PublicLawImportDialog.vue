@@ -151,7 +151,9 @@ onUnmounted(() => {
     <NSpin :show="loading">
       <p class="public-law-import-note">
         {{
-          query ? '处理当前检索条件下的全部法规，不限当前页。' : `处理所选 ${laws.length} 条法规。`
+          query
+            ? '处理当前检索条件下的全部法规，每批最多 50 条，当前批次全部处理结束后再检索下一批。'
+            : `处理所选 ${laws.length} 条法规。`
         }}
         请求模式采用系统统一配置，已向量化法规自动跳过。支持随时停止，关闭页面后任务继续运行。
       </p>

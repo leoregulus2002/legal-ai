@@ -117,13 +117,20 @@ class PublicLawVectorWorker:
                                 )
                                 if download_wait > 0:
                                     download_items = []
-                        # 等待中的下载仍在队列中，不能误判任务完成或继续翻页。
-                        if can_fetch and not download_items and download_wait == 0:
+                        # 本批所有法规完成下载、解析与向量化后，才能获取下一批。
+                        # 在途作业、即将启动的处理和等待间隔中的下载都不能提前翻页。
+                        if (
+                            can_fetch
+                            and not jobs
+                            and not processing_items
+                            and not download_items
+                            and download_wait == 0
+                        ):
                             if not task.scan_complete:
                                 query = PublicLawSearch.model_validate(task.query).model_copy(
                                     update={"page_num": task.source_page}
                                 )
-                            elif not jobs and not processing_items:
+                            else:
                                 await PublicLawTaskService(repo, knowledge).finish(
                                     task_id, "COMPLETED"
                                 )
