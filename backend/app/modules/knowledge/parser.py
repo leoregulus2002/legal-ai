@@ -1,4 +1,5 @@
 import re
+from bisect import bisect_left
 from datetime import date
 
 from app.modules.knowledge.extraction import Extracted
@@ -16,11 +17,19 @@ NUM = r"[零〇一二三四五六七八九十百千万两\d]+"
 HEADING = re.compile(
     rf"(?m)^[ \t\u3000]*(?:\#{{1,6}}[ \t]+)?(?:\*\*)?"
     rf"(?P<label>第\s*(?P<number>{NUM})\s*(?P<unit>[编章节条])"
-    rf"(?:\s*之\s*(?P<suffix>{NUM}))?|附\s*则|附\s*件(?:\s*{NUM})?[:：]?)"
+    rf"(?:\s*之\s*(?P<suffix>{NUM}))?|附\s*则|附\s*件(?:\s*{NUM})?[:：]?|附[ \t\u3000]*[:：])"
+)
+ANNEX_TITLE = re.compile(
+    r"(?m)^[ \t\u3000]*(?:\#{1,6}[ \t]+)?(?:\*\*)?"
+    r"(?P<title>《?[^\n《》#*]{2,180}(?:法典|条例|规定|办法|细则|决定|解释|规则|法)》?)"
+    r"[ \t\u3000]*(?:\*\*)?[ \t\u3000]*$"
 )
 ARTICLE_INLINE = re.compile(rf"(?<=[。；;\n\u3000 ])第\s*({NUM})\s*条(?:之\s*({NUM}))?")
 ARTICLE_REFERENCE = re.compile(
-    rf"[ \t\u3000]*(?:第[ \t\u3000]*{NUM}[ \t\u3000]*[款项目]|规定|所称|[的至、，和及])"
+    rf"[ \t\u3000]*(?:第[ \t\u3000]*{NUM}[ \t\u3000]*[款项目]|"
+    rf"(?:增加|增设|新增|增列)[ \t\u3000]*(?:第[ \t\u3000]*)?{NUM}[ \t\u3000]*[款项目]|"
+    r"(?:修改|修正|调整|改)为[ \t\u3000]*[:：]|"
+    r"(?:删除|删去)(?=[ \t\u3000]*(?:[。；;]|$))|规定|所称|[的至、，和及])"
 )
 KINDS = {"编": "PART", "章": "CHAPTER", "节": "SECTION", "条": "ARTICLE"}
 LEVEL = {"PART": 1, "CHAPTER": 2, "SECTION": 3, "SUPPLEMENT": 2, "ANNEX": 0, "ARTICLE": 4}
@@ -148,7 +157,7 @@ def parse(extracted: Extracted, mode: str) -> ParseResult:
         label = match["label"]
         compact = re.sub(r"\s", "", label)
         kind = KINDS.get(match["unit"] or "", "SUPPLEMENT" if compact == "附则" else "ANNEX")
-        # 段首的“第X条第Y款”等引用属于正文，不建立新的条文节点。
+        # “第X条第Y款”等引用及“第X条增加第Y款”等修改指令不建立条文节点。
         if kind == "ARTICLE" and ARTICLE_REFERENCE.match(text, match.end()):
             continue
         if kind == "CHAPTER":
@@ -189,6 +198,39 @@ def parse(extracted: Extracted, mode: str) -> ParseResult:
             )
         )
     markers.sort()
+    annex_start = next((marker[0] for marker in markers if marker[2] == "ANNEX"), None)
+    if annex_start is not None:
+        annex_titles = []
+        for title in ANNEX_TITLE.finditer(text, annex_start):
+            if HEADING.match(text, title.start()):
+                continue
+            index = bisect_left(markers, title.end(), key=lambda marker: marker[0])
+            if index == len(markers):
+                continue
+            following = markers[index]
+            # 附件中的独立法规标题须紧接第一编、第一章或第一条，避免把正文引用当标题。
+            if (
+                following[2] not in {"PART", "CHAPTER", "ARTICLE"}
+                or following[4:] != (1, 0)
+                or not re.fullmatch(
+                    r"\s*(?:\#{1,6}[ \t]+)?(?:\*\*)?", text[title.end() : following[0]]
+                )
+            ):
+                continue
+            start, end = title.span("title")
+            # 将紧邻的“附：/附件”与首份法规标题合为同一边界，保留原文及其位置。
+            if (
+                index > 0
+                and markers[index - 1][2] == "ANNEX"
+                and not text[markers[index - 1][1] : title.start()].strip()
+                and end - markers[index - 1][0] <= 300
+            ):
+                start = markers[index - 1][0]
+                markers[index - 1] = (start, end, "ANNEX", text[start:end], None, 0)
+            else:
+                annex_titles.append((start, end, "ANNEX", title["title"], None, 0))
+        markers.extend(annex_titles)
+        markers.sort()
     stack: list[StructureNode] = []
 
     def too_many_nodes() -> bool:
