@@ -23,6 +23,7 @@ class PublicLawVectorTask(Base):
         CheckConstraint("slot = 1", name="singleton_slot"),
         CheckConstraint("concurrency BETWEEN 1 AND 10", name="concurrency_range"),
         CheckConstraint("request_mode IN ('serial', 'concurrent')", name="request_mode_values"),
+        CheckConstraint("download_delay_ms BETWEEN 0 AND 60000", name="download_delay_range"),
         CheckConstraint("request_mode != 'serial' OR concurrency = 1", name="serial_concurrency"),
         Index(
             "uq_public_law_vector_tasks_active",
@@ -35,6 +36,8 @@ class PublicLawVectorTask(Base):
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
     slot: Mapped[int] = mapped_column(default=1, server_default="1")
     concurrency: Mapped[int] = mapped_column(default=1, server_default="1")
+    download_delay_ms: Mapped[int] = mapped_column(default=0, server_default="0")
+    next_download_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     request_mode: Mapped[str] = mapped_column(
         String(20), default="concurrent", server_default="concurrent"
     )

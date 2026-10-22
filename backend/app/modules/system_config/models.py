@@ -77,10 +77,12 @@ class VectorizationConfig(Base):
         CheckConstraint("id = 1", name="singleton"),
         CheckConstraint("concurrency BETWEEN 1 AND 10", name="concurrency_range"),
         CheckConstraint("request_mode IN ('serial', 'concurrent')", name="request_mode_values"),
+        CheckConstraint("download_delay_ms BETWEEN 0 AND 60000", name="download_delay_range"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     concurrency: Mapped[int] = mapped_column(default=1, server_default="1")
+    download_delay_ms: Mapped[int] = mapped_column(default=0, server_default="0")
     request_mode: Mapped[str] = mapped_column(
         String(20), default="concurrent", server_default="concurrent"
     )

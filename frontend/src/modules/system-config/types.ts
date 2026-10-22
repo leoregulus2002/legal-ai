@@ -65,6 +65,7 @@ export type VectorizationRequestMode = 'serial' | 'concurrent'
 export interface VectorizationSettings {
   request_mode: VectorizationRequestMode
   concurrency: number
+  download_delay_ms: number
 }
 
 export const defaultPolicy = (): Policy => ({

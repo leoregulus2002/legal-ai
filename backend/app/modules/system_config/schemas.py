@@ -145,3 +145,4 @@ class VectorizationSettings(BaseModel):
     model_config = ConfigDict(from_attributes=True, extra="forbid")
     request_mode: Literal["serial", "concurrent"] = "concurrent"
     concurrency: int = Field(default=1, ge=1, le=10, strict=True)
+    download_delay_ms: int = Field(default=0, ge=0, le=60_000, strict=True)

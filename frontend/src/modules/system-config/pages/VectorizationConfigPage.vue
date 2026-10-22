@@ -15,7 +15,11 @@ import { useErrorMessage } from '../../../composables/useErrorMessage'
 import { configApi } from '../api'
 import type { VectorizationSettings } from '../types'
 
-const form = reactive<VectorizationSettings>({ request_mode: 'concurrent', concurrency: 1 })
+const form = reactive<VectorizationSettings>({
+  request_mode: 'concurrent',
+  concurrency: 1,
+  download_delay_ms: 0,
+})
 const ready = ref(false)
 const loading = ref(false)
 const saving = ref(false)
@@ -39,6 +43,14 @@ async function save(): Promise<void> {
   if (!ready.value || loading.value || saving.value) return
   if (!Number.isInteger(form.concurrency) || form.concurrency < 1 || form.concurrency > 10) {
     message.warning('并发数请输入 1–10 的整数')
+    return
+  }
+  if (
+    !Number.isInteger(form.download_delay_ms) ||
+    form.download_delay_ms < 0 ||
+    form.download_delay_ms > 60000
+  ) {
+    message.warning('下载间隔请输入 0–60000 的整数（毫秒）')
     return
   }
   saving.value = true
@@ -100,7 +112,22 @@ onMounted(() => {
               @update:value="(value) => (form.concurrency = value ?? 1)"
             />
           </NFormItem>
-          <p>已向量化的法规自动跳过。保存后用于新任务；正在运行的任务保留启动时的模式和并发数。</p>
+          <NFormItem label="下载间隔（毫秒）">
+            <NInputNumber
+              :value="form.download_delay_ms"
+              :min="0"
+              :max="60000"
+              :step="100"
+              :precision="0"
+              :disabled="loading || saving"
+              @update:value="(value) => (form.download_delay_ms = value ?? 0)"
+            />
+          </NFormItem>
+          <p>
+            上一条法规下载结束后，至少等待指定毫秒数再下载下一条；第一条不等待，0 表示不额外等待。
+            两种请求模式均适用，等待期间已有文档可继续解析与向量化。
+          </p>
+          <p>已向量化的法规自动跳过。保存后用于新任务；正在运行的任务保留启动时的配置。</p>
           <div class="form-actions">
             <NButton type="primary" attr-type="submit" :loading="saving" :disabled="loading">
               保存配置

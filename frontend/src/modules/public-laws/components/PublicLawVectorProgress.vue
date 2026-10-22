@@ -30,6 +30,7 @@ const itemLabels: Record<string, string> = {
 }
 const stages: Record<string, string> = {
   SCANNING: '查找下一批法规',
+  WAITING_DOWNLOAD: '等待下载间隔结束',
   IMPORTING: '下载并导入原文',
   QUEUED: '等待解析',
   EXTRACTING: '提取正文',
@@ -53,11 +54,14 @@ const active = computed(() => ['RUNNING', 'STOPPING'].includes(props.task.status
     <div class="public-law-vector-heading">
       <div>
         <h2 id="vector-progress-title">{{ labels[task.status] }}</h2>
-        <p v-if="task.request_mode === 'serial'">
-          线性请求 · 逐条完成下载、解析与向量化 · 已有向量自动跳过
-        </p>
-        <p v-else>
-          并发请求 · 下载并发 1 · 解析与向量化并发 {{ task.concurrency }} · 已有向量自动跳过
+        <p>
+          <template v-if="task.request_mode === 'serial'"
+            >线性请求 · 逐条完成下载、解析与向量化</template
+          >
+          <template v-else>
+            并发请求 · 下载并发 1 · 解析与向量化并发 {{ task.concurrency }}
+          </template>
+          · 下载间隔 {{ task.download_delay_ms }} 毫秒 · 已有向量自动跳过
         </p>
       </div>
       <div class="public-law-import-actions">
@@ -89,7 +93,11 @@ const active = computed(() => ['RUNNING', 'STOPPING'].includes(props.task.status
     </div>
     <div v-if="active" aria-live="polite">
       <p v-if="!task.current_items.length" class="public-law-vector-current">
-        {{ task.status === 'STOPPING' ? '正在停止任务' : '正在查找法规' }}
+        {{
+          task.status === 'STOPPING'
+            ? '正在停止任务'
+            : (stages[task.stage ?? 'SCANNING'] ?? '正在查找法规')
+        }}
       </p>
       <p v-for="item in task.current_items" :key="item.id" class="public-law-vector-current">
         <strong>{{ item.title }}</strong>

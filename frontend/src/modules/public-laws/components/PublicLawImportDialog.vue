@@ -15,6 +15,7 @@ const showError = useErrorMessage()
 const baseId = ref<string | null>(null)
 const modelId = ref<string | null>(null)
 const concurrency = ref(1)
+const downloadDelayMs = ref(0)
 const requestMode = ref<VectorizationRequestMode>('concurrent')
 const bases = ref<{ label: string; value: string }[]>([])
 const models = ref<{ label: string; value: string }[]>([])
@@ -60,6 +61,7 @@ async function loadOptions(): Promise<void> {
     if (!alive || request !== optionsSequence) return
     bases.value = basePage.items.map((base) => ({ label: base.name, value: base.id }))
     concurrency.value = vectorization.concurrency
+    downloadDelayMs.value = vectorization.download_delay_ms
     requestMode.value = vectorization.request_mode
     models.value = configurations
       .filter((model) => model.enabled && model.model_type === 'embedding')
@@ -185,8 +187,9 @@ onUnmounted(() => {
           <template v-else>
             当前配置：并发请求，下载并发 1，解析与向量化并发 {{ concurrency }}。
           </template>
+          下载间隔 {{ downloadDelayMs }} 毫秒。
         </template>
-        <RouterLink to="/settings/vectorization" @click="emit('close')">调整请求模式</RouterLink>
+        <RouterLink to="/settings/vectorization" @click="emit('close')">调整向量化配置</RouterLink>
       </p>
       <p class="public-law-import-note">
         <RouterLink to="/knowledge" @click="emit('close')">前往管理或新建知识库</RouterLink>

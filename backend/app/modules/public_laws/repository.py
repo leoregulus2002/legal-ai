@@ -247,6 +247,7 @@ class PublicLawRepository:
             knowledge_base_id=task.knowledge_base_id,
             request_mode=task.request_mode,
             concurrency=task.concurrency,
+            download_delay_ms=task.download_delay_ms,
             total=sum(counts.values()) if task.status == "COMPLETED" else task.total,
             discovered=sum(counts.values()),
             completed=counts.get("COMPLETED", 0),

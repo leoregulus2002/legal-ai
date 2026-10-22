@@ -26,6 +26,14 @@ class PublicLawTaskService:
             counts[status] = counts.get(status, 0) + total - recovered
             counts["COMPLETED"] = counts.get("COMPLETED", 0) + recovered
         result = await self.repo.task_view(task, counts)
+        if (
+            not result.current_items
+            and task.status == "RUNNING"
+            and counts.get("PENDING", 0)
+            and task.next_download_at
+            and task.next_download_at > datetime.now(UTC)
+        ):
+            result.stage = "WAITING_DOWNLOAD"
         candidates = [item for item in result.recent if item.status in historical_failures]
         documents = {
             row.id: row
@@ -78,6 +86,7 @@ class PublicLawTaskService:
             embedding_model_id=data.embedding_model_id,
             request_mode=configuration.request_mode,
             concurrency=1 if configuration.request_mode == "serial" else configuration.concurrency,
+            download_delay_ms=configuration.download_delay_ms,
             embedding_fingerprint=provider.fingerprint,
             query=query.model_dump(mode="json") if query else None,
             total=None if query else len({law.id for law in data.laws}),

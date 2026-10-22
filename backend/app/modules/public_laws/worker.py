@@ -1,6 +1,7 @@
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -61,6 +62,7 @@ class PublicLawVectorWorker:
                         downloading.discard(item_id)
                         job.result()
                 query: PublicLawSearch | None = None
+                download_wait = 0.0
                 async with self.sessions.begin() as session:
                     repo, knowledge = self.services(session)
                     task = await repo.active_task()
@@ -108,7 +110,15 @@ class PublicLawVectorWorker:
                                 limit=1,
                                 exclude=list(jobs),
                             )
-                        if can_fetch and not download_items:
+                            if download_items and task.next_download_at:
+                                download_wait = max(
+                                    0.0,
+                                    (task.next_download_at - datetime.now(UTC)).total_seconds(),
+                                )
+                                if download_wait > 0:
+                                    download_items = []
+                        # 等待中的下载仍在队列中，不能误判任务完成或继续翻页。
+                        if can_fetch and not download_items and download_wait == 0:
                             if not task.scan_complete:
                                 query = PublicLawSearch.model_validate(task.query).model_copy(
                                     update={"page_num": task.source_page}
@@ -130,14 +140,20 @@ class PublicLawVectorWorker:
                             title=item.title,
                             document_id=str(item.document_id) if item.document_id else "",
                             stage=stage,
+                            download_delay_ms=str(task.download_delay_ms),
                         ):
                             jobs[item.id] = asyncio.create_task(self.process_item(task_id, item.id))
                 if query is not None:
                     await self.scan_page(task_id, query)
                 if jobs:
                     await asyncio.wait(
-                        jobs.values(), timeout=1, return_when=asyncio.FIRST_COMPLETED
+                        jobs.values(),
+                        timeout=min(1, download_wait) if download_wait > 0 else 1,
+                        return_when=asyncio.FIRST_COMPLETED,
                     )
+                elif download_wait > 0:
+                    # 不持有事务等待；最多一秒重新读取停止状态，且不阻塞解析与向量化。
+                    await asyncio.sleep(min(1, download_wait))
         finally:
             # 退出协调器前回收全部子任务，避免释放互斥锁后仍有旧任务执行。
             for job in jobs.values():
@@ -220,6 +236,10 @@ class PublicLawVectorWorker:
                     item = await repo.item(item_id)
                     if item:
                         item.document_id = result.state.document_id
+                    # 与下载结果在同一事务保存，避免重启后跳过剩余等待时间。
+                    task.next_download_at = datetime.now(UTC) + timedelta(
+                        milliseconds=task.download_delay_ms
+                    )
 
             try:
                 await self.retry_upstream(import_document)
@@ -227,9 +247,9 @@ class PublicLawVectorWorker:
                 if exc.code in UPSTREAM_ERRORS:
                     # 外部服务持续异常时中断协调器，避免后续法规逐条失败。
                     raise
-                await self.item_failed(item_id, exc)
+                await self.item_failed(task_id, item_id, exc)
             except Exception as exc:
-                await self.item_failed(item_id, exc)
+                await self.item_failed(task_id, item_id, exc)
             return
         await self.process_document(task_id, item_id, document_id, base_id)
 
@@ -290,9 +310,10 @@ class PublicLawVectorWorker:
             )
             await self.knowledge_worker.failed(document_id, base_id, token, kind, exc)
 
-    async def item_failed(self, item_id: UUID, exc: Exception) -> None:
+    async def item_failed(self, task_id: UUID, item_id: UUID, exc: Exception) -> None:
         logger.warning(
-            "公开法规导入失败 item_id=%s type=%s code=%s",
+            "公开法规导入失败 task_id=%s item_id=%s type=%s code=%s",
+            task_id,
             item_id,
             type(exc).__name__,
             exc.code if isinstance(exc, AppError) else "unexpected_error",
@@ -300,11 +321,17 @@ class PublicLawVectorWorker:
         )
         async with self.sessions.begin() as session:
             repo, _ = self.services(session)
+            task = await repo.task(task_id, lock=True)
             item = await repo.item(item_id)
             if item:
                 item.status = "FAILED"
                 item.error_message = (
                     exc.message if isinstance(exc, AppError) else "此法规导入未完成，请稍后重试"
+                )
+            if task:
+                # 单条失败后继续处理时，同样遵守间隔，且与失败状态一起提交。
+                task.next_download_at = datetime.now(UTC) + timedelta(
+                    milliseconds=task.download_delay_ms
                 )
 
     async def finish_items(

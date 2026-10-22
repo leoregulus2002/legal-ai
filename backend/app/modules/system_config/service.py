@@ -96,6 +96,7 @@ class ConfigService:
         row = await self.repo.vectorization(lock=True)
         row.request_mode = data.request_mode
         row.concurrency = data.concurrency
+        row.download_delay_ms = data.download_delay_ms
         await self.repo.session.flush()
         return VectorizationSettings.model_validate(row)
 

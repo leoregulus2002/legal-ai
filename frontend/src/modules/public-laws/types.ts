@@ -67,6 +67,7 @@ export interface VectorTask {
   knowledge_base_id: string
   request_mode: VectorizationRequestMode
   concurrency: number
+  download_delay_ms: number
   total: number | null
   discovered: number
   completed: number

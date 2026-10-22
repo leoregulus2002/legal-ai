@@ -171,6 +171,7 @@ class VectorTaskView(BaseModel):
     knowledge_base_id: UUID
     request_mode: Literal["serial", "concurrent"]
     concurrency: int
+    download_delay_ms: int
     total: int | None
     discovered: int
     completed: int
