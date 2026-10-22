@@ -30,6 +30,7 @@ class ModelConfig(Base):
     supports_images: Mapped[bool] = mapped_column(default=False)
     supports_pdf: Mapped[bool] = mapped_column(default=False)
     supports_json_mode: Mapped[bool] = mapped_column(default=False)
+    supports_tools: Mapped[bool] = mapped_column(default=False, server_default="false")
     context_tokens: Mapped[int] = mapped_column(default=32000)
     max_output_tokens: Mapped[int] = mapped_column(default=4096)
     token_parameter: Mapped[str] = mapped_column(String(30), default="max_tokens")

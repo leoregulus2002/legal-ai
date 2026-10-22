@@ -81,6 +81,18 @@ export const router = createRouter({
           meta: { title: '法律咨询模型' },
         },
         {
+          path: 'document-analysis',
+          name: 'document-analysis',
+          component: () => import('../modules/document-analysis/pages/DocumentAnalysisPage.vue'),
+          meta: { title: '法律文书分析' },
+        },
+        {
+          path: 'settings/document-analysis',
+          name: 'document-analysis-config',
+          component: () => import('../modules/document-analysis/pages/AnalysisSettingsPage.vue'),
+          meta: { title: '文书分析配置' },
+        },
+        {
           path: ':pathMatch(.*)*',
           name: 'not-found',
           component: () => import('../pages/NotFoundPage.vue'),

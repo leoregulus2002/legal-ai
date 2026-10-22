@@ -94,7 +94,10 @@ onMounted(() => {
       <div>
         <span class="eyebrow">系统配置</span>
         <h1>系统提示词</h1>
-        <p>设定回答方式与工作边界，每次编辑保留独立版本。</p>
+        <p>
+          统一管理法律咨询与文书分析各角色的提示词，每次编辑保留独立版本。
+          <RouterLink to="/settings/document-analysis">配置文书分析角色</RouterLink>
+        </p>
       </div>
       <NButton type="primary" @click="edit()">新增提示词</NButton>
     </div>
@@ -136,7 +139,7 @@ onMounted(() => {
               </template>
               删除“{{
                 prompt.name
-              }}”及其全部版本？如为默认提示词，将自动清空默认项。历史对话不受影响。
+              }}”及其全部版本？法律咨询默认项将自动清空；文书分析正在使用的提示词须先更换。历史任务保留原版本。
             </NPopconfirm>
           </div>
         </article>

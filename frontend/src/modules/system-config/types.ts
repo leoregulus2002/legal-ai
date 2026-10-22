@@ -10,6 +10,7 @@ export interface ModelInput {
   supports_images: boolean
   supports_pdf: boolean
   supports_json_mode: boolean
+  supports_tools: boolean
   context_tokens: number
   max_output_tokens: number
   token_parameter: 'max_tokens' | 'max_completion_tokens'

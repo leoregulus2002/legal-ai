@@ -41,6 +41,7 @@ class ModelInput(BaseModel):
     supports_images: bool = False
     supports_pdf: bool = False
     supports_json_mode: bool = False
+    supports_tools: bool = False
     context_tokens: int = Field(default=32000, ge=1, le=4_000_000)
     max_output_tokens: int = Field(default=4096, ge=0, le=200_000)
     token_parameter: Literal["max_tokens", "max_completion_tokens"] = "max_tokens"
@@ -60,6 +61,7 @@ class ModelInput(BaseModel):
             self.max_output_tokens = 0
             self.temperature = None
             self.supports_images = self.supports_pdf = self.supports_json_mode = False
+            self.supports_tools = False
             if self.embedding_query_instruction and self.protocol != "dashscope_embeddings":
                 raise PydanticCustomError("user_input", "检索指令仅适用于 DashScope 原生协议")
         else:
@@ -86,6 +88,7 @@ class ModelView(BaseModel):
     supports_images: bool
     supports_pdf: bool
     supports_json_mode: bool
+    supports_tools: bool = False
     context_tokens: int
     max_output_tokens: int
     token_parameter: str

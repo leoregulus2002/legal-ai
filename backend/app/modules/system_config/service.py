@@ -3,6 +3,8 @@ from uuid import UUID
 from app.common.exceptions import AppError
 from app.core.config import Settings
 from app.core.secrets import encrypt
+from app.modules.document_analysis.repository import AnalysisRepository
+from app.modules.document_analysis.schemas import AnalysisConfig
 from app.modules.knowledge.repository import KnowledgeRepository
 from app.modules.system_config.models import ModelConfig, PromptVersion, SystemPrompt
 from app.modules.system_config.repository import ConfigRepository
@@ -47,6 +49,8 @@ class ConfigService:
 
     async def save_prompt(self, data: PromptInput, prompt_id: UUID | None = None) -> PromptView:
         policy = Policy.model_validate((await self.repo.policy(lock=True)).settings)
+        if prompt_id and not data.enabled:
+            await self.require_unused_analysis_prompt(prompt_id)
         row = await self.repo.prompt(prompt_id, lock=True) if prompt_id else SystemPrompt(version=0)
         if row is None:
             raise AppError("prompt_not_found", "系统提示词不存在", 404)
@@ -63,6 +67,7 @@ class ConfigService:
     async def delete_prompt(self, prompt_id: UUID) -> None:
         policy_row = await self.repo.policy(lock=True)
         policy = Policy.model_validate(policy_row.settings)
+        await self.require_unused_analysis_prompt(prompt_id)
         row = await self.repo.prompt(prompt_id, lock=True)
         if row is None:
             raise AppError("prompt_not_found", "系统提示词不存在", 404)
@@ -70,6 +75,12 @@ class ConfigService:
             policy.default_prompt_id = None
             policy_row.settings = policy.model_dump(mode="json")
         await self.repo.delete_prompt(row)
+
+    async def require_unused_analysis_prompt(self, prompt_id: UUID) -> None:
+        row = await AnalysisRepository(self.repo.session).settings(lock=True)
+        config = AnalysisConfig.model_validate(row.settings)
+        if any(agent.prompt_id == prompt_id for agent in config.agent_configs.values()):
+            raise AppError("analysis_prompt_in_use", "请先在文书分析配置中更换此提示词")
 
     async def models(self) -> list[ModelView]:
         return [self.model_view(row) for row in await self.repo.models()]

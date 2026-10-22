@@ -72,6 +72,11 @@ API 通过统一 Axios 客户端；处理超时、网络、HTTP 错误，禁止�
 Phase 1 禁止实现认证、JWT、RBAC、Agent、LLM 调用、LangGraph、Embedding、RAG、采集、文书解析、多智能体、支付。
 未来 AI 公共能力位于 `app/ai`，按实际需要建立 providers/agents/tools/retrieval/prompts；业务流程仍在 modules。不要现在安装 AI 框架或创建空目录。禁止假造模型输出、检索结果和法律结论。
 
+## 服务器信息
+
+- SSH：`root@123.56.99.16`。
+- 服务器项目目录：`/home/legal`。
+
 ## Git 与工程原则
 
 使用 `feat:`、`fix:`、`docs:`、`chore:` 等清晰提交消息；提交应聚焦、可审查。更新依赖同时更新锁文件。

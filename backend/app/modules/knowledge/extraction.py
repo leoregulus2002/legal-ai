@@ -1,21 +1,28 @@
 import io
+import logging
 import re
+import shutil
 import subprocess
+import sys
 import tempfile
 import zipfile
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from pathlib import Path
+from time import perf_counter
+from typing import BinaryIO
 from xml.etree import ElementTree
 
 from pypdf import PdfReader
 
 from app.common.exceptions import AppError
+from app.core.logging import redact_log_text
 from app.modules.knowledge.schemas import ParseIssue, SourceSpan
 
 MAX_TEXT = 2_000_000
 MAX_XML = 64 * 1024 * 1024
 OLE_SIGNATURE = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+logger = logging.getLogger(__name__)
 MEDIA_TYPES = {
     ".pdf": "application/pdf",
     ".doc": "application/msword",
@@ -114,51 +121,278 @@ def assign_text(result: Extracted, text: str) -> None:
         offset += len(line)
 
 
-def extract_legacy_word(data: bytes, executable: str) -> str:
+def log_word_failure(
+    error: BaseException,
+    stderr: BinaryIO,
+    *,
+    executable: str,
+    input_size: int,
+    started: float,
+    stage: str = "legacy_word_extract",
+) -> str:
+    try:
+        stderr.seek(0, io.SEEK_END)
+        size = stderr.tell()
+        stderr.seek(0)
+        raw = stderr.read(4096)
+    except OSError as diagnostic_error:
+        logger.error(
+            "旧版 Word 诊断信息读取失败 stage=legacy_word_diagnostics "
+            "executable=%s input_bytes=%s，保留原始提取异常",
+            executable,
+            input_size,
+            exc_info=diagnostic_error,
+        )
+        size, raw = -1, b""
+    diagnostic = redact_log_text(raw.decode("utf-8", errors="replace"))
+    logger.error(
+        "旧版 Word 提取失败 stage=%s executable=%s returncode=%s "
+        "input_bytes=%s duration_ms=%.1f stderr_bytes=%s stderr_encoding=utf-8 "
+        "stderr_decode_replacements=%s stderr_truncated=%s stderr_excerpt=%r",
+        stage,
+        executable,
+        getattr(error, "returncode", None),
+        input_size,
+        (perf_counter() - started) * 1000,
+        size,
+        diagnostic.count("\ufffd"),
+        size > len(raw),
+        diagnostic,
+        exc_info=error,
+    )
+    return diagnostic.lower()
+
+
+def read_word_text(output: BinaryIO) -> str:
+    output.seek(0)
+    value = output.read(MAX_TEXT * 4 + 1)
+    if len(value) > MAX_TEXT * 4:
+        raise AppError("document_too_long", "文档提取内容过长，请拆分后导入")
+    try:
+        return value.decode("utf-8-sig").replace("\r\n", "\n").replace("\r", "\n")
+    except UnicodeError as exc:
+        raise AppError(
+            "legacy_word_encoding", "旧版 Word 文字编码无法识别，请转换为 DOCX 后重新导入"
+        ) from exc
+
+
+def extract_small_word(source: Path, converter: str, *, input_size: int) -> str:
+    if converter:
+        executable = shutil.which(converter)
+    elif sys.platform == "darwin":
+        executable = "/usr/bin/textutil" if Path("/usr/bin/textutil").is_file() else None
+    else:
+        executable = shutil.which("soffice") or shutil.which("libreoffice")
+    if not executable:
+        logger.error(
+            "短篇 Word 兼容组件未找到 stage=legacy_word_convert "
+            "configured_executable=%s platform=%s input_bytes=%s",
+            converter or "auto",
+            sys.platform,
+            input_size,
+        )
+        raise AppError(
+            "word_converter_unavailable",
+            "此短篇 Word 需要兼容解析组件，请联系管理员配置，或另存为 DOCX 后导入",
+            503,
+        )
+    directory = source.parent
+    if Path(executable).name.lower() == "textutil":
+        command = [
+            executable,
+            "-convert",
+            "txt",
+            "-encoding",
+            "UTF-8",
+            "-noload",
+            "-nostore",
+            "-stdout",
+            str(source),
+        ]
+        converted_file = None
+    else:
+        # 独立用户配置与输出目录，避免并发转换复用进程或污染原件。
+        output_directory = directory / "converted"
+        output_directory.mkdir()
+        profile = directory / "office-profile"
+        command = [
+            executable,
+            f"-env:UserInstallation={profile.as_uri()}",
+            "--headless",
+            "--nologo",
+            "--nodefault",
+            "--norestore",
+            "--convert-to",
+            "txt:Text (encoded):UTF8",
+            "--outdir",
+            str(output_directory),
+            str(source),
+        ]
+        converted_file = output_directory / "original.txt"
+    started = perf_counter()
+    logger.info(
+        "启用短篇 Word 兼容解析 stage=legacy_word_convert executable=%s "
+        "input_bytes=%s reason=antiword_small_text_stream",
+        executable,
+        input_size,
+    )
+    with tempfile.TemporaryFile() as output, tempfile.TemporaryFile() as stderr:
+        try:
+            completed = subprocess.run(
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=output,
+                stderr=stderr,
+                timeout=60,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            log_word_failure(
+                exc,
+                stderr,
+                executable=executable,
+                input_size=input_size,
+                started=started,
+                stage="legacy_word_convert",
+            )
+            raise AppError(
+                "word_conversion_failed", "Word 兼容解析未完成，请稍后重试或另存为 DOCX 后导入"
+            ) from exc
+        if completed.returncode != 0 or (
+            converted_file is not None and not converted_file.is_file()
+        ):
+            failure: Exception = (
+                subprocess.CalledProcessError(completed.returncode, command)
+                if completed.returncode != 0
+                else RuntimeError(
+                    "Word converter returned success without creating its output file"
+                )
+            )
+            if converted_file is not None:
+                # LibreOffice 的 stdout 为转换状态；textutil 的 stdout 是正文，不写入日志。
+                output.seek(0)
+                status = output.read(4096)
+                logger.error(
+                    "Word 转换未生成可用文件 stage=legacy_word_convert executable=%s "
+                    "returncode=%s output_exists=%s status_excerpt=%r status_truncated=%s",
+                    executable,
+                    completed.returncode,
+                    converted_file.is_file(),
+                    redact_log_text(status.decode("utf-8", errors="replace")),
+                    bool(output.read(1)),
+                )
+            log_word_failure(
+                failure,
+                stderr,
+                executable=executable,
+                input_size=input_size,
+                started=started,
+                stage="legacy_word_convert",
+            )
+            raise AppError(
+                "word_conversion_failed", "Word 兼容解析失败，请确认文件完整或另存为 DOCX 后导入"
+            ) from failure
+        if converted_file is None:
+            text = read_word_text(output)
+        else:
+            with converted_file.open("rb") as converted:
+                text = read_word_text(converted)
+    if not text.strip():
+        logger.warning(
+            "短篇 Word 兼容解析未返回正文 stage=legacy_word_convert executable=%s "
+            "input_bytes=%s duration_ms=%.1f",
+            executable,
+            input_size,
+            (perf_counter() - started) * 1000,
+        )
+        raise AppError("word_conversion_empty", "Word 未提取到正文，请确认内容或另存为 DOCX 后导入")
+    logger.info(
+        "短篇 Word 兼容解析完成 stage=legacy_word_convert executable=%s "
+        "input_bytes=%s characters=%s duration_ms=%.1f",
+        executable,
+        input_size,
+        len(text),
+        (perf_counter() - started) * 1000,
+    )
+    return text
+
+
+def extract_legacy_word(data: bytes, executable: str, converter: str = "") -> str:
     # 在后台提取线程中执行；独立临时目录，原件保持不变。
     with tempfile.TemporaryDirectory(prefix="legal-ai-word-") as directory:
         source = Path(directory) / "original.doc"
         source.write_bytes(data)
-        with tempfile.TemporaryFile() as output:
+        with tempfile.TemporaryFile() as output, tempfile.TemporaryFile() as stderr:
+            command = [executable, "-t", "-w", "0", "-m", "UTF-8.txt", str(source)]
+            started = perf_counter()
             try:
                 completed = subprocess.run(
-                    [executable, "-t", "-w", "0", "-m", "UTF-8.txt", str(source)],
+                    command,
                     stdin=subprocess.DEVNULL,
                     stdout=output,
-                    stderr=subprocess.DEVNULL,
+                    stderr=stderr,
                     timeout=30,
                     check=False,
                 )
             except OSError as exc:
+                log_word_failure(
+                    exc, stderr, executable=executable, input_size=len(data), started=started
+                )
                 raise AppError(
                     "word_extractor_unavailable", "旧版 Word 解析组件未就绪，请联系管理员"
                 ) from exc
             except subprocess.TimeoutExpired as exc:
+                log_word_failure(
+                    exc, stderr, executable=executable, input_size=len(data), started=started
+                )
                 raise AppError(
                     "legacy_word_timeout", "旧版 Word 提取超时，请转换为 DOCX 或 PDF 后重新导入"
                 ) from exc
             if completed.returncode != 0:
+                failure = subprocess.CalledProcessError(completed.returncode, command)
+                diagnostic = log_word_failure(
+                    failure, stderr, executable=executable, input_size=len(data), started=started
+                )
+                if "text stream of this file is too small to handle" in diagnostic:
+                    return extract_small_word(source, converter, input_size=len(data))
+                if (
+                    "mapping file" in diagnostic
+                    or "mappingfile" in diagnostic
+                    or "can't set the utf-8 locale" in diagnostic
+                ):
+                    raise AppError(
+                        "word_extractor_unavailable",
+                        "旧版 Word 解析组件配置异常，请联系管理员",
+                    ) from failure
+                if "encrypt" in diagnostic or "password protected" in diagnostic:
+                    raise AppError(
+                        "encrypted_legacy_word", "Word 文件已加密，请解密后重新导入"
+                    ) from failure
+                if "version of word" in diagnostic and (
+                    "not supported" in diagnostic or "before word 6" in diagnostic
+                ):
+                    raise AppError(
+                        "unsupported_legacy_word",
+                        "此 Word 版本暂不支持，请另存为 DOCX 或 PDF 后重新导入",
+                    ) from failure
+                if completed.returncode < 0:
+                    raise AppError(
+                        "word_extractor_failed", "Word 解析组件运行异常，请联系管理员", 503
+                    ) from failure
                 raise AppError(
                     "invalid_legacy_word",
-                    "旧版 Word 文件无法提取，请确认未加密且未损坏，或转换为 DOCX、PDF 后重新导入",
-                )
-            output.seek(0)
-            value = output.read(MAX_TEXT * 4 + 1)
-            if len(value) > MAX_TEXT * 4:
-                raise AppError("document_too_long", "文档提取内容过长，请拆分后导入")
-            try:
-                return value.decode("utf-8-sig").replace("\r\n", "\n").replace("\r", "\n")
-            except UnicodeError as exc:
-                raise AppError(
-                    "legacy_word_encoding", "旧版 Word 文字编码无法识别，请转换为 DOCX 后重新导入"
-                ) from exc
+                    "旧版 Word 文本提取失败，请另存为 DOCX 或 PDF 后重新导入",
+                ) from failure
+            return read_word_text(output)
 
 
-def extract(filename: str, data: bytes, word_extractor_path: str = "antiword") -> Extracted:
+def extract(
+    filename: str, data: bytes, word_extractor_path: str = "antiword", word_converter_path: str = ""
+) -> Extracted:
     suffix = Path(filename).suffix.lower()
     result = Extracted()
     if suffix in {".doc", ".docx"} and data.startswith(OLE_SIGNATURE):
-        assign_text(result, extract_legacy_word(data, word_extractor_path))
+        assign_text(result, extract_legacy_word(data, word_extractor_path, word_converter_path))
         result.issues.append(
             ParseIssue(
                 id="legacy_word_layout",

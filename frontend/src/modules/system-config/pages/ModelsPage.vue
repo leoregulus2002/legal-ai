@@ -45,6 +45,7 @@ const defaults = (): ModelForm => ({
   supports_images: false,
   supports_pdf: false,
   supports_json_mode: false,
+  supports_tools: false,
   context_tokens: '32000',
   max_output_tokens: '4096',
   token_parameter: 'max_tokens',
@@ -224,6 +225,7 @@ async function save(): Promise<void> {
       supports_images: isEmbedding.value ? false : values.supports_images,
       supports_pdf: isEmbedding.value ? false : values.supports_pdf,
       supports_json_mode: isEmbedding.value ? false : values.supports_json_mode,
+      supports_tools: isEmbedding.value ? false : values.supports_tools,
       temperature: isEmbedding.value ? null : values.temperature,
       embedding_dimensions: isEmbedding.value ? values.embedding_dimensions : null,
       embedding_batch_size: isEmbedding.value ? values.embedding_batch_size : 8,
@@ -555,6 +557,7 @@ onMounted(() => {
               <NCheckbox v-model:checked="form.supports_images">图片</NCheckbox>
               <NCheckbox v-model:checked="form.supports_pdf">PDF</NCheckbox>
               <NCheckbox v-model:checked="form.supports_json_mode">JSON 模式</NCheckbox>
+              <NCheckbox v-model:checked="form.supports_tools">工具调用</NCheckbox>
             </div>
           </NFormItem>
         </section>

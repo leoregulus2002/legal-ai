@@ -13,6 +13,7 @@ from app.core.logging import RequestLoggingMiddleware, configure_logging
 from app.core.redis import RedisClient
 from app.modules.consultation.memory import MemoryStore
 from app.modules.consultation.service import ConsultationService
+from app.modules.document_analysis.worker import AnalysisWorker
 from app.modules.knowledge.worker import KnowledgeWorker
 from app.modules.public_laws.worker import PublicLawVectorWorker
 
@@ -41,6 +42,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             knowledge_tasks.append(asyncio.create_task(knowledge_worker.maintain_lexical_index()))
             knowledge_tasks.append(
                 asyncio.create_task(PublicLawVectorWorker(database.sessions, config).run())
+            )
+            knowledge_tasks.append(
+                asyncio.create_task(AnalysisWorker(database.sessions, config).run())
             )
 
             async def stop_knowledge() -> None:

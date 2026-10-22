@@ -42,5 +42,6 @@ export const workspaceFeatures: readonly WorkspaceFeature[] = [
     title: '法律文书分析',
     description: '合同审阅与法律文书处理。',
     icon: 'document',
+    to: '/document-analysis',
   },
 ]

@@ -78,6 +78,13 @@ watch(
       <p class="nav-section-label settings-section-label">系统配置</p>
       <nav class="navigation" aria-label="系统配置">
         <RouterLink
+          to="/settings/document-analysis"
+          class="nav-item"
+          :class="{ 'is-active': route.name === 'document-analysis-config' }"
+          :aria-current="route.name === 'document-analysis-config' ? 'page' : undefined"
+          ><AppIcon name="document" :size="20" /><span>文书分析配置</span></RouterLink
+        >
+        <RouterLink
           to="/settings/prompts"
           class="nav-item"
           :class="{ 'is-active': route.name === 'prompt-config' }"
@@ -137,7 +144,10 @@ watch(
       <main
         id="main-content"
         class="page-content"
-        :class="{ 'page-content--conversation': route.name === 'consultation' }"
+        :class="{
+          'page-content--conversation':
+            route.name === 'consultation' || route.name === 'document-analysis',
+        }"
         tabindex="-1"
       >
         <RouterView :key="route.path" />

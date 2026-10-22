@@ -1,5 +1,12 @@
 <script setup lang="ts">
-import { NConfigProvider, NGlobalStyle, NMessageProvider, zhCN, dateZhCN } from 'naive-ui'
+import {
+  NConfigProvider,
+  NDialogProvider,
+  NGlobalStyle,
+  NMessageProvider,
+  zhCN,
+  dateZhCN,
+} from 'naive-ui'
 import type { GlobalThemeOverrides } from 'naive-ui'
 
 const theme: GlobalThemeOverrides = {
@@ -24,7 +31,9 @@ const theme: GlobalThemeOverrides = {
   <NConfigProvider :locale="zhCN" :date-locale="dateZhCN" :theme-overrides="theme">
     <NGlobalStyle />
     <NMessageProvider>
-      <RouterView />
+      <NDialogProvider>
+        <RouterView />
+      </NDialogProvider>
     </NMessageProvider>
   </NConfigProvider>
 </template>

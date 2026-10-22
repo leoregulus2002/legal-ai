@@ -21,7 +21,9 @@ class Settings(BaseSettings):
     config_encryption_key: SecretStr | None = None
     attachment_directory: str = "./data/attachments"
     word_extractor_path: str = "antiword"
+    word_converter_path: str = ""
     diagnostic_directory: str = "./data/diagnostics"
+    mcp_allow_private: bool = False
 
     @field_validator("database_url")
     @classmethod

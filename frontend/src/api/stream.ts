@@ -1,4 +1,5 @@
 import { ApiError, apiClient } from './client'
+import type { AxiosResponse } from 'axios'
 
 export interface StreamEvent {
   kind: string
@@ -18,6 +19,47 @@ export async function postEventStream(
     signal,
     timeout,
   })
+  await readEventStream(response, onEvent)
+}
+
+export async function getEventStream(
+  path: string,
+  signal: AbortSignal,
+  onEvent: (event: StreamEvent) => void,
+): Promise<void> {
+  const controller = new AbortController()
+  let idleTimer: ReturnType<typeof setTimeout> | undefined
+  let timedOut = false
+  const activity = (): void => {
+    clearTimeout(idleTimer)
+    idleTimer = setTimeout(() => {
+      timedOut = true
+      controller.abort()
+    }, 45_000)
+  }
+  activity()
+  try {
+    const response = await apiClient.get<ReadableStream<Uint8Array>>(path, {
+      adapter: 'fetch',
+      responseType: 'stream',
+      signal: AbortSignal.any([signal, controller.signal]),
+      timeout: 0,
+    })
+    await readEventStream(response, onEvent, activity)
+  } catch (error: unknown) {
+    if (timedOut && !signal.aborted) throw new ApiError('状态连接超时，正在重新连接', 'timeout')
+    throw error
+  } finally {
+    clearTimeout(idleTimer)
+    controller.abort()
+  }
+}
+
+async function readEventStream(
+  response: AxiosResponse<ReadableStream<Uint8Array>>,
+  onEvent: (event: StreamEvent) => void,
+  onActivity?: () => void,
+): Promise<void> {
   if (
     !String(response.headers['content-type']).includes('text/event-stream') ||
     typeof response.data?.getReader !== 'function'
@@ -30,6 +72,7 @@ export async function postEventStream(
   try {
     while (true) {
       const { done, value } = await reader.read()
+      onActivity?.()
       buffer += decoder.decode(value, { stream: !done }).replace(/\r\n/g, '\n')
       if (buffer.length > 1_000_000) throw new ApiError('流式响应过长，请重新发送', 'unknown')
       let boundary: number
