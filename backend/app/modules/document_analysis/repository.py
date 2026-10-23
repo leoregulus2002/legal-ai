@@ -74,6 +74,14 @@ class AnalysisRepository:
             )
         )
 
+    async def first_run_id(self, workspace_id: UUID) -> UUID | None:
+        return await self.session.scalar(
+            select(AnalysisRun.id)
+            .where(AnalysisRun.workspace_id == workspace_id)
+            .order_by(AnalysisRun.created_at, AnalysisRun.id)
+            .limit(1)
+        )
+
     async def active(self, workspace_id: UUID, *, exclude: UUID | None = None) -> bool:
         query = select(AnalysisRun.id).where(
             AnalysisRun.workspace_id == workspace_id, AnalysisRun.status.in_(("queued", "running"))

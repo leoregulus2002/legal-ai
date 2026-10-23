@@ -269,7 +269,7 @@ class AnalysisTools:
                     id=call_id,
                     run_id=self.run_id,
                     agent=agent,
-                    name=name,
+                    name=self.external[name][1] if name in self.external else name,
                     status="running",
                     duration_ms=0,
                     result=None,

@@ -2,6 +2,7 @@ import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
 import { ApiError } from '../../api/client'
 import { postEventStream } from '../../api/stream'
+import { isToolActivity, type ToolActivity } from '../../components/toolActivity'
 import { consultationApi } from './api'
 import {
   isRecord,
@@ -26,6 +27,8 @@ export const useConsultationStore = defineStore('consultation', () => {
   const generating = ref(false)
   const stopRequested = ref(false)
   const compressingContext = ref(false)
+  const generatingFiles = ref(false)
+  const draftToolCalls = ref<ToolActivity[]>([])
   const loading = ref(false)
   const draftAnswer = ref('')
   const draftReasoning = ref('')
@@ -128,6 +131,8 @@ export const useConsultationStore = defineStore('consultation', () => {
     generating.value = true
     stopRequested.value = false
     compressingContext.value = false
+    generatingFiles.value = false
+    draftToolCalls.value = []
     draftQuestion.value = text
     draftAttachments.value = [...files]
     draftAnswer.value = ''
@@ -143,15 +148,31 @@ export const useConsultationStore = defineStore('consultation', () => {
         `/consultation/conversations/${id}/stream`,
         data,
         requestController.signal,
-        (options.value.policy.request_timeout + 15) * 1000,
+        (options.value.policy.request_timeout + 30) * 1000,
         (event) => {
           if (
             event.kind === 'status' &&
             isRecord(event.data) &&
-            (event.data.phase === 'compressing_context' || event.data.phase === 'generating')
-          )
+            (event.data.phase === 'compressing_context' ||
+              event.data.phase === 'generating' ||
+              event.data.phase === 'generating_files')
+          ) {
             compressingContext.value = event.data.phase === 'compressing_context'
-          else if (
+            generatingFiles.value = event.data.phase === 'generating_files'
+          } else if (event.kind === 'tool_call' && isToolActivity(event.data)) {
+            const activity = event.data
+            const index = draftToolCalls.value.findIndex((call) => call.id === activity.id)
+            if (index < 0) draftToolCalls.value.push(activity)
+            else draftToolCalls.value[index] = activity
+          } else if (
+            event.kind === 'answer_replace' &&
+            isRecord(event.data) &&
+            typeof event.data.text === 'string' &&
+            typeof event.data.reasoning === 'string'
+          ) {
+            draftAnswer.value = event.data.text
+            draftReasoning.value = event.data.reasoning
+          } else if (
             event.kind === 'reasoning_delta' &&
             isRecord(event.data) &&
             typeof event.data.text === 'string'
@@ -172,6 +193,7 @@ export const useConsultationStore = defineStore('consultation', () => {
           )
             draftSources.value = event.data
           else if (event.kind === 'done' && isRecord(event.data) && isTurn(event.data.turn)) {
+            generatingFiles.value = false
             compressingContext.value = false
             const turn = event.data.turn
             saved = true
@@ -181,8 +203,8 @@ export const useConsultationStore = defineStore('consultation', () => {
             if (conversation) {
               conversation.history_version = turn.sequence
               conversation.updated_at = turn.created_at
-              if (turn.sequence === 1)
-                conversation.title = Array.from(turn.user_text).slice(0, 40).join('') || '附件咨询'
+              if (typeof event.data.title === 'string' && event.data.title.trim())
+                conversation.title = event.data.title
               conversations.value = [
                 conversation,
                 ...conversations.value.filter((row) => row.id !== id),
@@ -211,6 +233,11 @@ export const useConsultationStore = defineStore('consultation', () => {
       failure = error
     } finally {
       compressingContext.value = false
+      generatingFiles.value = false
+      for (const call of draftToolCalls.value) {
+        if (call.status === 'preparing' || call.status === 'running')
+          call.status = requestController.signal.aborted ? 'cancelled' : 'interrupted'
+      }
     }
     try {
       // 正常完成直接使用 done 的完整消息，不重复读取历史和附件。
@@ -239,6 +266,7 @@ export const useConsultationStore = defineStore('consultation', () => {
             attachments: [...draftAttachments.value],
             sources: [...draftSources.value],
             model_name: modelName,
+            tool_calls: draftToolCalls.value.map((call) => ({ ...call })),
           },
         ]
       }
@@ -251,6 +279,7 @@ export const useConsultationStore = defineStore('consultation', () => {
       draftAnswer.value = ''
       draftReasoning.value = ''
       draftSources.value = []
+      draftToolCalls.value = []
     }
     const cancelled = requestController.signal.aborted
     if (failure && !saved && !cancelled) throw failure
@@ -260,6 +289,10 @@ export const useConsultationStore = defineStore('consultation', () => {
     if (!controller || controller.signal.aborted) return
     stopRequested.value = true
     compressingContext.value = false
+    generatingFiles.value = false
+    for (const call of draftToolCalls.value) {
+      if (call.status === 'preparing' || call.status === 'running') call.status = 'cancelled'
+    }
     controller?.abort()
   }
   return {
@@ -272,6 +305,8 @@ export const useConsultationStore = defineStore('consultation', () => {
     generating,
     stopRequested,
     compressingContext,
+    generatingFiles,
+    draftToolCalls,
     loading,
     draftAnswer,
     draftReasoning,

@@ -1,3 +1,5 @@
+import { isGeneratedFile, type GeneratedFile } from '../files/types'
+
 export type DocumentKind = 'auto' | 'contract' | 'litigation' | 'judgment' | 'other'
 export type Intent =
   | 'auto'
@@ -116,6 +118,8 @@ export interface ToolCallView {
 export interface RunView {
   id: string
   workspace_id: string
+  workspace_name?: string | null
+  files?: GeneratedFile[]
   status: RunStatus
   failure_message: string | null
   stage: string
@@ -278,6 +282,9 @@ export function isRunView(value: unknown): value is RunView {
     ['id', 'workspace_id', 'stage', 'instruction', 'created_at', 'updated_at'].every(
       (key) => typeof value[key] === 'string',
     ) &&
+    (value.workspace_name === undefined || isNullableString(value.workspace_name)) &&
+    (value.files === undefined ||
+      (Array.isArray(value.files) && value.files.every(isGeneratedFile))) &&
     typeof value.status === 'string' &&
     Object.hasOwn(statusLabels, value.status) &&
     isNullableString(value.failure_message) &&

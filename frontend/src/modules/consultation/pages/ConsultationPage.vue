@@ -8,6 +8,9 @@ import ContextUsageIndicator from '../components/ContextUsageIndicator.vue'
 import MessageAttachment from '../components/MessageAttachment.vue'
 import MessageCopyButton from '../components/MessageCopyButton.vue'
 import ReasoningPanel from '../components/ReasoningPanel.vue'
+import ConversationAnswer from '../components/ConversationAnswer.vue'
+import { readToolActivities } from '../../../components/toolActivity'
+import GeneratedFiles from '../../files/components/GeneratedFiles.vue'
 import { useConsultationStore } from '../store'
 import type { Attachment, Source, Turn } from '../types'
 
@@ -34,6 +37,8 @@ const chatTurns = computed(() =>
       answer: turn.answer,
       reasoning: turn.reasoning ?? '',
       files: turnAttachments(turn),
+      generatedFiles: turn.files ?? [],
+      toolCalls: readToolActivities(turn.config_snapshot.tool_calls),
       sources: turn.sources,
       modelLabel: modelName(turn),
       retrieval: retrievalLabel(turn),
@@ -48,6 +53,8 @@ const chatTurns = computed(() =>
         answer: turn.answer,
         reasoning: turn.reasoning,
         files: turn.attachments,
+        generatedFiles: [],
+        toolCalls: turn.tool_calls ?? [],
         sources: turn.sources,
         modelLabel: turn.model_name,
         retrieval: undefined,
@@ -294,7 +301,12 @@ async function loadMore(): Promise<void> {
   }
 }
 watch(
-  () => [store.draftAnswer, store.draftReasoning, chatTurns.value.length],
+  () => [
+    store.draftAnswer,
+    store.draftReasoning,
+    store.draftToolCalls.map((call) => `${call.id}:${call.status}`).join(','),
+    chatTurns.value.length,
+  ],
   async () => {
     await nextTick()
     messageArea.value?.scrollTo({ top: messageArea.value.scrollHeight })
@@ -396,7 +408,8 @@ onBeforeUnmount(() => {
                 <MessageCopyButton :text="turn.answer" label="复制回答" />
               </div>
               <ReasoningPanel v-if="turn.reasoning" :content="turn.reasoning" />
-              <p v-if="turn.answer" class="message-text">{{ turn.answer }}</p>
+              <ConversationAnswer :text="turn.answer" :calls="turn.toolCalls" />
+              <GeneratedFiles :files="turn.generatedFiles" />
               <details v-if="turn.sources.length" class="answer-sources">
                 <summary>
                   知识来源 · {{ turn.sources.length }}
@@ -439,7 +452,7 @@ onBeforeUnmount(() => {
                       ? '已停止'
                       : store.compressingContext
                         ? '压缩上下文'
-                        : store.draftReasoning && !store.draftAnswer
+                        : store.draftReasoning && !store.draftAnswer && !store.draftToolCalls.length
                           ? '思考中'
                           : '生成中'
                   }}</span></span
@@ -449,12 +462,14 @@ onBeforeUnmount(() => {
               <ReasoningPanel
                 v-if="store.draftReasoning"
                 :content="store.draftReasoning"
-                :active="!store.draftAnswer && !store.stopRequested"
+                :active="!store.draftAnswer && !store.draftToolCalls.length && !store.stopRequested"
               />
-              <p v-if="store.draftAnswer" class="message-text">
-                {{ store.draftAnswer
-                }}<span v-if="!store.stopRequested" class="stream-caret" aria-hidden="true" />
-              </p>
+              <ConversationAnswer
+                v-if="store.draftAnswer || store.draftToolCalls.length"
+                :text="store.draftAnswer"
+                :calls="store.draftToolCalls"
+                :active="!store.stopRequested"
+              />
               <NSpin v-else-if="!store.stopRequested && !store.draftReasoning" size="small" />
             </div>
           </article>

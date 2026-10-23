@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from app.modules.files.schemas import GeneratedFileView
 
 
 class ConversationInput(BaseModel):
@@ -38,6 +41,32 @@ class TurnView(BaseModel):
     sources: list[dict[str, object]]
     config_snapshot: dict[str, object]
     created_at: datetime
+    files: list[GeneratedFileView] = Field(default_factory=list)
+
+
+class ToolActivity(BaseModel):
+    id: str
+    name: str
+    status: Literal["preparing", "running", "completed"]
+    answer_offset: int = Field(ge=0)
+    summary: str = ""
+    duration_ms: int | None = None
+
+
+class ResponsePlan(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    mode: Literal["context", "knowledge"]
+    query: str = Field(max_length=500)
+    file_requested: bool = Field(strict=True)
+
+    @model_validator(mode="after")
+    def validate_query(self) -> ResponsePlan:
+        self.query = self.query.strip()
+        if self.mode == "knowledge" and not self.query:
+            raise ValueError("Knowledge retrieval requires a query")
+        if self.mode == "context" and self.query:
+            raise ValueError("Context-only requests must not include a retrieval query")
+        return self
 
 
 class GenerateInput(BaseModel):
@@ -79,6 +108,7 @@ class MemoryTurn(BaseModel):
     user_text: str
     answer: str
     attachment_ids: list[UUID] = Field(default_factory=list)
+    generated_files: dict[str, object] | None = None
 
 
 class Memory(BaseModel):

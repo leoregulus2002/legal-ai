@@ -4,6 +4,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
+from app.modules.files.schemas import GeneratedFileView
+
 DocumentKind = Literal["auto", "contract", "litigation", "judgment", "other"]
 Intent = Literal[
     "comprehensive", "summary", "contract_review", "litigation", "judgment", "compare", "question"
@@ -110,6 +112,8 @@ class ResumeInput(BaseModel):
 
 
 class IntentResult(BaseModel):
+    file_requested: bool = False
+    conversation_title: str = Field(default="", max_length=40)
     primary_intent: Intent = "comprehensive"
     secondary_intents: list[Intent] = Field(default_factory=list, max_length=6)
     document_kinds: dict[str, DocumentKind] = Field(default_factory=dict)
@@ -127,10 +131,18 @@ class IntentResult(BaseModel):
     knowledge_base_ids: list[UUID] = Field(default_factory=list, max_length=100)
     mcp_server_ids: list[UUID] = Field(default_factory=list, max_length=10)
 
+    @field_validator("conversation_title", mode="before")
+    @classmethod
+    def clean_conversation_title(cls, value: object) -> str:
+        if not isinstance(value, str):
+            return ""
+        return " ".join(value.split()).strip("\"'“”《》` ")[:40]
+
 
 class IntentPlan(IntentResult):
     # AI 必须明确给出选择；历史存储视图保留默认值以兼容已有任务。
     primary_intent: Intent = Field(...)
+    file_requested: bool = Field(...)
     perspective: str = Field(min_length=1, max_length=100)
     jurisdiction: str = Field(min_length=1, max_length=100)
     depth: Literal["standard", "deep"] = Field(...)
@@ -240,6 +252,8 @@ class RunView(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: UUID
     workspace_id: UUID
+    workspace_name: str | None = None
+    files: list[GeneratedFileView] = Field(default_factory=list)
     status: RunStatus
     stage: str
     instruction: str

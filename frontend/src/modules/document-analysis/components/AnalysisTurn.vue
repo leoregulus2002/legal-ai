@@ -2,7 +2,10 @@
 import { computed, ref } from 'vue'
 import { NButton, NSpin, NTag } from 'naive-ui'
 import AppIcon from '../../../components/AppIcon.vue'
+import ToolCallRecord from '../../../components/ToolCallRecord.vue'
+import type { ToolStatus } from '../../../components/toolActivity'
 import AnalysisReport from './AnalysisReport.vue'
+import GeneratedFiles from '../../files/components/GeneratedFiles.vue'
 import { intentOptions, isActive, statusLabels } from '../types'
 import type { DocumentCitation, DocumentView, RunView } from '../types'
 
@@ -40,16 +43,21 @@ const stateLabels: Record<string, string> = {
   cancelled: '已停止',
   interrupted: '等待恢复',
 }
-const toolLabel = (name: string): string =>
-  ({
-    document_read_spans: '阅读文书原文',
-    document_search: '查找相关段落',
-    document_compare: '比较文书差异',
-    knowledge_search: '检索内部资料',
-    law_search: '检索法律法规',
-    law_get_article: '核对法条原文',
-    analysis_read_parent: '查阅上轮分析',
-  })[name] ?? '查询外部资料'
+function toolStatus(status: string): ToolStatus {
+  if (status === 'running') return isActive(props.run.status) ? 'running' : 'interrupted'
+  if (status === 'completed' || status === 'failed' || status === 'cancelled') return status
+  return 'interrupted'
+}
+const callingTool = computed(
+  () =>
+    props.run.tool_calls.some((call) => call.status === 'running') || props.run.stage === 'files',
+)
+const workingLabel = computed(() => {
+  if (props.run.stage === 'queued') return '正在准备分析'
+  if (props.run.stage === 'intent') return '正在理解你的需求'
+  if (props.run.stage === 'files') return '正在生成文件'
+  return '正在阅读材料并核对依据'
+})
 </script>
 
 <template>
@@ -78,15 +86,29 @@ const toolLabel = (name: string): string =>
         ><span>{{ run.intent.perspective || '中立分析' }}</span
         ><span>{{ run.intent.jurisdiction || '中国大陆' }}</span>
       </div>
-      <div v-if="isActive(run.status)" class="analysis-chat-working" role="status">
-        <NSpin :size="16" /><span>{{
-          run.stage === 'queued'
-            ? '正在准备分析'
-            : run.stage === 'intent'
-              ? '正在理解你的需求'
-              : '正在阅读材料、调用工具并核对依据'
-        }}</span>
+      <div
+        v-if="isActive(run.status) && !callingTool"
+        class="analysis-chat-working"
+        role="status"
+        aria-live="polite"
+      >
+        <NSpin :size="16" /><span>{{ workingLabel }}</span>
       </div>
+      <ToolCallRecord
+        v-for="call in run.tool_calls"
+        :key="call.id"
+        :name="call.name"
+        :status="toolStatus(call.status)"
+        :duration-ms="call.duration_ms"
+      />
+      <ToolCallRecord
+        v-if="run.stage === 'files' || run.files?.length"
+        name="generate_files"
+        :status="
+          run.files?.length ? 'completed' : isActive(run.status) ? 'preparing' : 'interrupted'
+        "
+        :summary="run.files?.length ? `已生成 ${run.files.length} 个文件` : ''"
+      />
       <p v-if="run.status === 'needs_input' && run.clarification" class="analysis-prose">
         {{ run.clarification }}
       </p>
@@ -100,25 +122,17 @@ const toolLabel = (name: string): string =>
           ><NButton text size="small" @click="$emit('export')">导出报告</NButton>
         </div>
       </template>
+      <GeneratedFiles :files="run.files ?? []" />
       <div v-if="run.status === 'cancelled'" class="analysis-muted">
         分析已停止，可以重新发送需求或继续本次分析。
       </div>
-      <details v-if="run.steps.length || run.tool_calls.length" class="analysis-chat-process">
-        <summary>
-          分析过程<span v-if="run.tool_calls.length">
-            · 已调用工具 {{ run.tool_calls.length }} 次</span
-          >
-        </summary>
+      <details v-if="run.steps.length" class="analysis-chat-process">
+        <summary>分析过程</summary>
         <ol>
           <li v-for="step in run.steps" :key="step.id">
             {{ roles[step.agent] || '整理分析' }} · {{ stateLabels[step.status] || '处理中' }}
           </li>
         </ol>
-        <ul v-if="run.tool_calls.length">
-          <li v-for="call in run.tool_calls" :key="call.id">
-            {{ toolLabel(call.name) }} · {{ stateLabels[call.status] || '处理中' }}
-          </li>
-        </ul>
       </details>
       <div class="analysis-chat-answer-actions">
         <NButton

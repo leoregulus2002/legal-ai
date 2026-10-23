@@ -1,7 +1,7 @@
 import hashlib
 import logging
 import re
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from html.parser import HTMLParser
@@ -258,3 +258,78 @@ def response_diagnostics(
         details["raw_excerpt"] = "[non-text body omitted]"
         details["visible_text"] = "[non-text body omitted]"
     return details
+
+
+class StreamEvidence:
+    def __init__(self) -> None:
+        self.prefix = bytearray()
+        self.tail = bytearray()
+        self.size = 0
+        self.nul_count = 0
+        self.digest = hashlib.sha256()
+        self.events: dict[str, int] = {}
+        self.completed = False
+        self.exhausted = False
+
+    def capture(self, data: bytes) -> None:
+        self.size += len(data)
+        self.nul_count += data.count(b"\x00")
+        self.digest.update(data)
+        self.prefix.extend(data[: max(0, 16384 - len(self.prefix))])
+        self.tail.extend(data[-2048:])
+        del self.tail[:-2048]
+
+    def event(self, kind: object) -> None:
+        allowed = {
+            "response.created",
+            "response.in_progress",
+            "response.completed",
+            "response.failed",
+            "response.incomplete",
+            "response.output_item.added",
+            "response.output_item.done",
+            "response.function_call_arguments.delta",
+            "response.function_call_arguments.done",
+            "response.output_text.delta",
+            "response.reasoning_text.delta",
+            "response.reasoning_summary_text.delta",
+            "chat.completion.chunk",
+            "done",
+            "error",
+        }
+        key = kind if isinstance(kind, str) and kind in allowed else "other"
+        self.events[key] = self.events.get(key, 0) + 1
+
+    def details(self, response: httpx.Response | None) -> dict[str, object]:
+        details = response_diagnostics(
+            response, bytes(self.prefix), complete=self.exhausted and self.size == len(self.prefix)
+        )
+        features = details.get("byte_features")
+        details.update(
+            response_size=self.size,
+            captured_prefix_bytes=len(self.prefix),
+            stream_completed=self.completed,
+            stream_events=dict(self.events),
+            tail_raw_excerpt=safe_excerpt(bytes(self.tail).decode("utf-8", errors="replace"), 1024),
+            tail_excerpt_truncated=self.size > len(self.tail),
+            byte_features={
+                **(features if isinstance(features, dict) else {}),
+                "sha256": self.digest.hexdigest(),
+                "nul_count": self.nul_count,
+            },
+        )
+        return details
+
+
+class ObservedStream(httpx.AsyncByteStream):
+    def __init__(self, stream: httpx.AsyncByteStream, evidence: StreamEvidence) -> None:
+        self.stream, self.evidence = stream, evidence
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        async for chunk in self.stream:
+            self.evidence.capture(chunk)
+            yield chunk
+        self.evidence.exhausted = True
+
+    async def aclose(self) -> None:
+        await self.stream.aclose()

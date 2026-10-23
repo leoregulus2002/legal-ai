@@ -43,6 +43,8 @@ from app.modules.document_analysis.schemas import (
     WorkspaceInput,
     WorkspaceView,
 )
+from app.modules.files.repository import FileRepository
+from app.modules.files.schemas import GeneratedFileView
 from app.modules.knowledge.extraction import MEDIA_TYPES, extract
 from app.modules.knowledge.repository import KnowledgeRepository
 from app.modules.system_config.repository import ConfigRepository
@@ -275,6 +277,13 @@ class AnalysisService:
         self, repo: AnalysisRepository, row: AnalysisRun, *, details: bool = False
     ) -> RunView:
         view = RunView.model_validate(row)
+        workspace = await repo.workspace(row.workspace_id)
+        view.workspace_name = workspace.name if workspace else None
+        if row.status in {"completed", "partial"}:
+            view.files = [
+                GeneratedFileView.model_validate(file)
+                for file in await FileRepository(repo.session).analysis(row.id)
+            ]
         saved_input = RunInput.model_validate(row.input)
         view.document_ids = saved_input.document_ids
         history = row.checkpoint.get("clarification_history", [])

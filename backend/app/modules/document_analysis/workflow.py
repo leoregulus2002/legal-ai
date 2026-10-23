@@ -36,6 +36,8 @@ from app.modules.document_analysis.schemas import (
     SourceView,
 )
 from app.modules.document_analysis.tools import AnalysisStopped, AnalysisTools, ServerSnapshot
+from app.modules.files.repository import FileRepository
+from app.modules.files.service import FileService
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +119,7 @@ class AnalysisWorkflow:
     ) -> None:
         self.sessions, self.settings, self.run_id, self.token = sessions, settings, run_id, token
         self.data: RunInput
+        self.workspace_id: UUID
         self.snapshot: ExecutionSnapshot
         self.tools: AnalysisTools
         self.checkpoint: dict[str, object] = {}
@@ -136,6 +139,7 @@ class AnalysisWorkflow:
             if row is None or row.cancel_requested:
                 raise AnalysisStopped
             self.data = RunInput.model_validate(row.input)
+            self.workspace_id = row.workspace_id
             self.snapshot = ExecutionSnapshot.model_validate(row.config_snapshot)
             self.checkpoint = row.checkpoint
             if row.parent_run_id:
@@ -531,6 +535,18 @@ class AnalysisWorkflow:
     async def identify(self, _state: GraphState) -> GraphState:
         async def action() -> dict[str, object]:
             prompt = {
+                "file_request_requirement": (
+                    "file_requested必须明确为布尔值：只有用户明确要求生成、导出或修改可下载的文件"
+                    "（例如Word/PPT/Excel/PDF/CSV/文本/代码或ZIP）时为true。"
+                    "仅上传、阅读或分析文件、讨论文件能力不算生成请求。"
+                    "创建文件时保留用户指定的格式与内容要求，缺少关键材料时先澄清。"
+                ),
+                "conversation_title_requirement": (
+                    "根据本次首次提问与材料，生成最近对话列表使用的简短简介，"
+                    "写入conversation_title，建议10至20字，最多40字。"
+                    "概括核心法律事项与用户诉求，不直接截取提问或照抄文件名，"
+                    "不加引号、Markdown或解释，不新增事实、法律结论或个人敏感信息。"
+                ),
                 "task": (
                     "完成意图识别与分析能力规划。"
                     if "intent" in self.snapshot.prompt_snapshots
@@ -586,9 +602,20 @@ class AnalysisWorkflow:
                 roles.append("judgment")
         self.intent.agents = list(dict.fromkeys(self.intent.agents or roles)) or ["litigation"]
         async with self.sessions.begin() as session:
-            row = await AnalysisRepository(session).owned(self.run_id, self.token)
-            if row is None:
+            repo = AnalysisRepository(session)
+            # 与用户操作保持相同的加锁顺序：工作区在前，分析任务在后。
+            workspace = await repo.workspace(self.workspace_id, lock=True)
+            row = await repo.owned(self.run_id, self.token)
+            if row is None or workspace is None or row.cancel_requested:
                 raise AnalysisStopped
+            title = (self.intent.conversation_title or "").strip()
+            if (
+                title
+                and not row.checkpoint.get("conversation_title_set")
+                and await repo.first_run_id(row.workspace_id) == row.id
+            ):
+                workspace.name = title
+                row.checkpoint = {**row.checkpoint, "conversation_title_set": True}
             row.intent = self.intent.model_dump(mode="json")
             row.clarification = self.intent.clarification
             if self.intent.clarification:
@@ -930,11 +957,32 @@ class AnalysisWorkflow:
             review_summary=self.review.summary if self.review_completed else "",
         )
         await self.tools.persist_evidence()
+        rendered_files = []
+        if self.intent.file_requested:
+            async with self.sessions.begin() as session:
+                row = await AnalysisRepository(session).owned(self.run_id, self.token)
+                if row is None or row.cancel_requested:
+                    raise AnalysisStopped
+                row.stage, row.updated_at = "files", datetime.now(UTC)
+                await AnalysisRepository(session).notify_run(self.run_id)
+            await self.reserve_model()
+            instruction = (
+                self.data.instruction
+                + "\n补充要求：\n"
+                + json.dumps(self.checkpoint.get("clarification_answers", []), ensure_ascii=False)
+            )
+            with log_context(processing_stage="analysis_files", analysis_run_id=str(self.run_id)):
+                rendered_files = await FileService.from_report(
+                    self.provider("intent"), instruction, report.model_dump_json()
+                )
         async with self.sessions.begin() as session:
             row = await AnalysisRepository(session).owned(self.run_id, self.token)
             if row is None or row.cancel_requested:
                 raise AnalysisStopped
             row.report = report.model_dump(mode="json")
+            await FileRepository(session).delete_analysis(self.run_id)
+            if rendered_files:
+                await FileService.save(session, rendered_files, analysis_run_id=self.run_id)
             if row.active_started_at:
                 row.elapsed_seconds += max(
                     0, int((datetime.now(UTC) - row.active_started_at).total_seconds())

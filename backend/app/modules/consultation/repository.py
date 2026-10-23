@@ -115,14 +115,16 @@ class ConsultationRepository:
             .values(active_token=None, active_until=None)
         )
 
-    async def save_turn(self, conversation_id: UUID, token: UUID, row: Turn) -> Turn:
+    async def save_turn(
+        self, conversation_id: UUID, token: UUID, row: Turn, *, title: str | None = None
+    ) -> Turn:
         conversation = await self.conversation(conversation_id, lock=True)
         if conversation.active_token != token:
             raise AppError("generation_expired", "本次生成已失效，请重新发送", 409)
         conversation.history_version += 1
         conversation.updated_at = datetime.now(UTC)
-        if conversation.history_version == 1:
-            conversation.title = row.user_text[:40] or "附件咨询"
+        if conversation.history_version == 1 and title:
+            conversation.title = title
         row.sequence = conversation.history_version
         self.session.add(row)
         if row.attachment_ids:

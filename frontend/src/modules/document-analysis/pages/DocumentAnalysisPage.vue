@@ -100,6 +100,8 @@ function stopStream(): void {
   reconnectAttempts = 0
 }
 function upsert(row: RunView): void {
+  const workspace = workspaces.value.find((item) => item.id === row.workspace_id)
+  if (workspace && row.workspace_name?.trim()) workspace.name = row.workspace_name
   const previous = runs.value.find((item) => item.id === row.id)
   runs.value = [row, ...runs.value.filter((item) => item.id !== row.id)]
   if (row.status === 'failed' && previous && isActive(previous.status)) {
@@ -230,14 +232,12 @@ async function initialize(): Promise<void> {
     }
   }
 }
-async function ensureWorkspace(suggestedName?: string): Promise<string> {
+async function ensureWorkspace(): Promise<string> {
   if (workspaceId.value) return workspaceId.value
   if (newWorkspacePromise) return newWorkspacePromise
   const generation = workspaceGeneration
   newWorkspacePromise = (async () => {
-    const row = await analysisApi.saveWorkspace(
-      input.value.trim().slice(0, 35) || suggestedName?.slice(0, 35) || '新文书对话',
-    )
+    const row = await analysisApi.saveWorkspace('新文书对话')
     if (!alive) return row.id
     workspaces.value = [row, ...workspaces.value]
     if (generation !== workspaceGeneration) return row.id
@@ -306,7 +306,7 @@ async function upload(event: Event): Promise<void> {
   }
   uploading.value = true
   try {
-    const id = await ensureWorkspace(files[0]?.name)
+    const id = await ensureWorkspace()
     const generation = workspaceGeneration
     for (const file of files) {
       if (!alive || id !== workspaceId.value || generation !== workspaceGeneration) return
@@ -473,7 +473,7 @@ onBeforeUnmount(() => {
           class="analysis-chat-conversation"
           :class="{ 'is-active': workspace.id === workspaceId }"
         >
-          <button :disabled="busy" @click="selectWorkspace(workspace.id)">
+          <button :disabled="busy" :title="workspace.name" @click="selectWorkspace(workspace.id)">
             <AppIcon name="chat" :size="16" /><span>{{ workspace.name }}</span>
           </button>
           <button

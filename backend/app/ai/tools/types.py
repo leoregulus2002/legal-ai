@@ -105,10 +105,10 @@ def decode_object(value: str, *, limit: int) -> dict[str, object]:
     return json_object(parsed)
 
 
-def check_schema(schema: dict[str, object]) -> int:
+def check_schema(schema: dict[str, object], *, max_nodes: int = MAX_SCHEMA_NODES) -> int:
     started = perf_counter()
     try:
-        units = validation_units(schema, max_nodes=MAX_SCHEMA_NODES)
+        units = validation_units(schema, max_nodes=max_nodes)
         encode_json(schema, limit=MAX_SCHEMA_BYTES)
         if schema.get("type") != "object":
             raise ValueError("Tool schema must have object type")

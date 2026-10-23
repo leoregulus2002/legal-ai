@@ -1,4 +1,6 @@
 import type { ModelConfig, Policy, SystemPrompt } from '../system-config/types'
+import { isGeneratedFile, type GeneratedFile } from '../files/types'
+import type { ToolActivity } from '../../components/toolActivity'
 
 export interface Conversation {
   id: string
@@ -39,6 +41,7 @@ export interface Turn {
   sources: Source[]
   config_snapshot: Record<string, unknown>
   created_at: string
+  files?: GeneratedFile[]
 }
 export interface StoppedTurn {
   request_id: string
@@ -50,6 +53,7 @@ export interface StoppedTurn {
   attachments: Attachment[]
   sources: Source[]
   model_name: string
+  tool_calls?: ToolActivity[]
 }
 export interface ConsultationOptions {
   models: ModelConfig[]
@@ -106,6 +110,8 @@ export function isTurn(value: unknown): value is Turn {
     Array.isArray(value.sources) &&
     value.sources.every(isSource) &&
     isRecord(value.config_snapshot) &&
-    typeof value.created_at === 'string'
+    typeof value.created_at === 'string' &&
+    (value.files === undefined ||
+      (Array.isArray(value.files) && value.files.every(isGeneratedFile)))
   )
 }

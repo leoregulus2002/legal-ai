@@ -9,6 +9,15 @@ from typing import Any, Literal
 
 import httpx
 
+from app.ai.providers.diagnostics import (
+    ObservedStream,
+    StreamEvidence,
+    log_failure,
+    response_diagnostics,
+    safe_url,
+)
+from app.ai.tools.streaming import StreamingCalls
+from app.ai.tools.types import ToolDefinition
 from app.common.exceptions import AppError
 
 logger = logging.getLogger(__name__)
@@ -28,8 +37,10 @@ def diagnostic_identifier(value: object, api_key: str) -> str | None:
 
 @dataclass(frozen=True)
 class StreamPart:
-    kind: Literal["text", "reasoning"]
+    kind: Literal["text", "reasoning", "tool_start", "tool_call"]
     text: str
+    tool_name: str | None = None
+    arguments: dict[str, object] | None = None
 
 
 @dataclass(frozen=True)
@@ -53,10 +64,28 @@ class Provider:
                 yield part.text
 
     async def stream_parts(
-        self, messages: list[dict[str, Any]], *, structured: bool = False
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        structured: bool = False,
+        tools: list[ToolDefinition] | None = None,
+        required_tool: str | None = None,
     ) -> AsyncIterator[StreamPart]:
+        definitions = tools or []
+        for tool in definitions:
+            tool.validate()
+        if required_tool is not None and not any(
+            tool.name == required_tool for tool in definitions
+        ):
+            raise AppError("required_tool_unavailable", "文件生成工具未启用，请更换模型或检查配置")
         # 文本按字符保守估算；附件由业务层另外预留预算。
-        text_tokens = 0
+        text_tokens = (
+            estimate_text_tokens(
+                json.dumps([tool.input_schema for tool in definitions], ensure_ascii=False)
+            )
+            if definitions
+            else 0
+        )
         for message in messages:
             content = message["content"]
             if isinstance(content, str):
@@ -71,7 +100,7 @@ class Provider:
                         text_tokens += math.ceil(len(part["file"]["file_data"]) / 6)
         if text_tokens >= self.context_tokens - self.max_output_tokens:
             raise AppError("context_exceeded", "上下文过长，请减少记忆轮数或附件，或切换模型")
-        headers = {"Content-Type": "application/json"}
+        headers = {"Content-Type": "application/json", "Accept-Encoding": "identity"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
         payload: dict[str, Any] = {"model": self.model_name, "stream": True}
@@ -92,7 +121,39 @@ class Provider:
             if structured:
                 payload["response_format"] = {"type": "json_object"}
             path = "/chat/completions"
+        if definitions:
+            payload["parallel_tool_calls"] = False
+            payload["tools"] = [
+                {
+                    "type": "function",
+                    "name": tool.name,
+                    "description": tool.description,
+                    "parameters": tool.input_schema,
+                    "strict": False,
+                }
+                if self.protocol == "responses"
+                else {
+                    "type": "function",
+                    "function": {
+                        "name": tool.name,
+                        "description": tool.description,
+                        "parameters": tool.input_schema,
+                    },
+                }
+                for tool in definitions
+            ]
+            if required_tool is not None:
+                payload["tool_choice"] = (
+                    {"type": "function", "name": required_tool}
+                    if self.protocol == "responses"
+                    else {"type": "function", "function": {"name": required_tool}}
+                )
         started = perf_counter()
+        calls = StreamingCalls()
+        announced_calls: set[int] = set()
+        tool_names = {tool.name for tool in definitions}
+        evidence = StreamEvidence()
+        response: httpx.Response | None = None
         try:
             async with httpx.AsyncClient(
                 timeout=httpx.Timeout(self.timeout, connect=10), follow_redirects=False
@@ -100,8 +161,25 @@ class Provider:
                 async with client.stream(
                     "POST", self.base_url + path, json=payload, headers=headers
                 ) as response:
+                    if isinstance(response.stream, httpx.AsyncByteStream):
+                        response.stream = ObservedStream(response.stream, evidence)
                     if response.status_code >= 300:
                         raise await self._http_error(response)
+                    if "text/event-stream" not in response.headers.get("content-type", "").lower():
+                        body = bytearray()
+                        async for chunk in response.aiter_bytes(chunk_size=1024):
+                            body.extend(chunk[: max(0, 16384 - len(body))])
+                            if len(body) >= 16384:
+                                break
+                        logger.error(
+                            "模型响应类型异常 stage=provider_stream_content_type details=%s",
+                            response_diagnostics(
+                                response, bytes(body), complete=response.is_stream_consumed
+                            ),
+                        )
+                        raise AppError(
+                            "provider_response_type", "模型返回格式异常，请检查模型服务配置", 502
+                        )
                     data_lines: list[str] = []
                     frame_size = 0
                     completed = False
@@ -113,10 +191,13 @@ class Provider:
                             data_lines, frame_size = [], 0
                             if event_data == "[DONE]":
                                 completed = True
+                                evidence.completed = True
+                                evidence.event("done")
                                 break
                             item = json.loads(event_data)
                             if not isinstance(item, dict):
                                 raise ValueError
+                            evidence.event(item.get("type") or item.get("object"))
                             if item.get("error") or item.get("type") in {
                                 "error",
                                 "response.failed",
@@ -124,6 +205,7 @@ class Provider:
                             }:
                                 raise self._stream_error(response, item, started=started)
                             if self.protocol == "responses":
+                                calls.response_event(item)
                                 if item.get("type") == "response.output_text.delta":
                                     delta = item.get("delta")
                                     if isinstance(delta, str):
@@ -137,15 +219,17 @@ class Provider:
                                         yield StreamPart("reasoning", delta)
                                 if item.get("type") == "response.completed":
                                     completed = True
-                                    break
+                                    evidence.completed = True
                             else:
                                 for choice in item.get("choices", []):
                                     if choice.get("finish_reason") in {
                                         "length",
                                         "content_filter",
-                                        "tool_calls",
                                         "function_call",
-                                    }:
+                                    } or (
+                                        choice.get("finish_reason") == "tool_calls"
+                                        and not definitions
+                                    ):
                                         raise self._stream_error(
                                             response,
                                             item,
@@ -153,12 +237,25 @@ class Provider:
                                             finish_reason=choice["finish_reason"],
                                         )
                                     part = choice.get("delta", {})
+                                    for call in part.get("tool_calls", []):
+                                        function = call.get("function", {})
+                                        calls.add(
+                                            call.get("index"),
+                                            function.get("name"),
+                                            function.get("arguments"),
+                                        )
                                     reasoning = part.get("reasoning_content")
                                     if isinstance(reasoning, str):
                                         yield StreamPart("reasoning", reasoning)
                                     content = part.get("content")
                                     if isinstance(content, str):
                                         yield StreamPart("text", content)
+                            for index, pending in calls.calls.items():
+                                if index not in announced_calls and pending.name in tool_names:
+                                    announced_calls.add(index)
+                                    yield StreamPart("tool_start", "", pending.name)
+                            if completed:
+                                break
                             continue
                         if line.startswith("data:"):
                             frame_size += len(line)
@@ -167,12 +264,29 @@ class Provider:
                             data_lines.append(line[5:].lstrip())
                     if not completed:
                         raise AppError("stream_interrupted", "模型连接中断，请重新发送", 502)
+                    results = calls.results(definitions)
+                    if required_tool is not None and not any(
+                        name == required_tool for name, _ in results
+                    ):
+                        raise AppError(
+                            "required_tool_missing",
+                            "模型未实际生成文件，请重试或更换支持文件生成的模型",
+                            502,
+                        )
+                    for name, arguments in results:
+                        yield StreamPart("tool_call", "", name, arguments)
         except httpx.TimeoutException as exc:
-            logger.warning(
-                "模型连接超时 protocol=%s duration_ms=%.1f type=%s",
-                self.protocol,
-                (perf_counter() - started) * 1000,
-                type(exc).__name__,
+            log_failure(
+                logger,
+                "provider_stream_timeout",
+                exc,
+                duration_ms=(perf_counter() - started) * 1000,
+                details={
+                    "method": "POST",
+                    "url": safe_url(self.base_url + path),
+                    **evidence.details(response),
+                    **calls.diagnostics(),
+                },
             )
             raise AppError("provider_timeout", "模型响应超时，请稍后重试或切换模型", 504) from exc
         except (
@@ -182,9 +296,35 @@ class Provider:
             TypeError,
             AttributeError,
         ) as exc:
+            log_failure(
+                logger,
+                "provider_stream_decode",
+                exc,
+                duration_ms=(perf_counter() - started) * 1000,
+                details={
+                    "method": "POST",
+                    "url": safe_url(self.base_url + path),
+                    **evidence.details(response),
+                    **calls.diagnostics(),
+                },
+            )
             raise AppError(
                 "provider_unavailable", "模型连接异常，请检查配置或稍后重试", 502
             ) from exc
+        except AppError as exc:
+            log_failure(
+                logger,
+                "provider_stream",
+                exc,
+                duration_ms=(perf_counter() - started) * 1000,
+                details={
+                    "method": "POST",
+                    "url": safe_url(self.base_url + path),
+                    **evidence.details(response),
+                    **calls.diagnostics(),
+                },
+            )
+            raise
 
     def _stream_error(
         self,
@@ -305,6 +445,10 @@ class Provider:
             self.protocol,
             code or "unknown",
             request_id or "unknown",
+        )
+        logger.error(
+            "模型异常响应 stage=provider_http details=%s",
+            response_diagnostics(response, bytes(body), complete=response.is_stream_consumed),
         )
         if response.status_code == 401:
             return AppError(
